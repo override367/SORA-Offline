@@ -196,6 +196,43 @@
     return null;
   }
 
+  const PROMPT_BANNED_PHRASES = [
+    'Download with prompt',
+    'Sora Saver ready',
+    'Ready for another download',
+    'Auto mode detected'
+  ];
+
+  function normalizeWhitespace(value) {
+    if (typeof value !== 'string') return '';
+    return value.replace(/\s+/g, ' ').trim();
+  }
+
+  function selectBestLine(value) {
+    if (typeof value !== 'string') return '';
+    const segments = value
+      .split(/\n+/)
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    if (segments.length === 0) {
+      return normalizeWhitespace(value);
+    }
+    segments.sort((a, b) => b.length - a.length);
+    return normalizeWhitespace(segments[0]);
+  }
+
+  function isLikelyPrompt(value) {
+    const normalized = normalizeWhitespace(value);
+    if (!normalized) return false;
+    if (normalized.length < 16) return false;
+    if (normalized.split(/\s+/).length < 4) return false;
+    if (normalized.length > 1200) return false;
+    for (const phrase of PROMPT_BANNED_PHRASES) {
+      if (normalized.includes(phrase)) return false;
+    }
+    return true;
+  }
+
   function extractPromptText() {
     const selectors = [
       '[data-testid="prompt"]',
@@ -203,18 +240,63 @@
       '[data-purpose="prompt"]',
       '[data-prompt]',
       '[class*="prompt"]',
-      '[class*="Prompt"]'
+      '[class*="Prompt"]',
+      'button.truncate',
+      'button[data-state]'
     ];
+    const candidates = [];
+    const seen = new Set();
+
+    const addCandidate = (value, weight = 0) => {
+      const normalized = normalizeWhitespace(value);
+      if (!isLikelyPrompt(normalized)) return;
+      if (seen.has(normalized)) return;
+      const score = Math.min(normalized.length, 600) + weight * 200;
+      candidates.push({ text: normalized, score });
+      seen.add(normalized);
+    };
+
+    const evaluateElement = (element, weight = 0) => {
+      if (!(element instanceof HTMLElement)) return;
+      if (element.closest('#sora-saver-banner')) return;
+      const attributePrompt = extractPromptFromAttributes(element);
+      if (attributePrompt) {
+        addCandidate(attributePrompt, weight + 1);
+      }
+      const text = element.innerText ?? element.textContent ?? '';
+      const bestLine = selectBestLine(text);
+      if (bestLine) {
+        addCandidate(bestLine, weight);
+      }
+    };
+
     for (const selector of selectors) {
       const elements = document.querySelectorAll(selector);
       for (const el of elements) {
-        const attributePrompt = extractPromptFromAttributes(el);
-        if (attributePrompt) return attributePrompt;
-        const text = el.textContent?.trim();
-        if (text && text.length > 10) {
-          return text;
-        }
+        evaluateElement(el, 2);
       }
+    }
+
+    if (candidates.length === 0) {
+      const buttons = document.querySelectorAll('button, [role="button"]');
+      for (const button of buttons) {
+        evaluateElement(button, 1);
+      }
+    }
+
+    if (candidates.length === 0) {
+      for (const element of deepCollect(document.body || document)) {
+        if (!(element instanceof HTMLElement)) continue;
+        const tag = element.tagName;
+        if (!['P', 'DIV', 'SPAN', 'ARTICLE', 'SECTION', 'BUTTON'].includes(tag)) continue;
+        if (element.closest('header, nav, footer, #sora-saver-banner')) continue;
+        evaluateElement(element);
+      }
+    }
+
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => b.score - a.score);
+      return candidates[0].text;
     }
 
     // Fall back to meta tags or page title.
