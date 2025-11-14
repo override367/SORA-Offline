@@ -47,6 +47,27 @@ p.lead {
   max-width: 720px;
 }
 
+.muted {
+  color: var(--text-muted);
+}
+
+.section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.section-header h2 {
+  margin: 0;
+}
+
+.section-header .muted {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
 .controls, .status-bar, .harvest-controls {
   background: var(--panel-color);
   border: 1px solid var(--border-color);

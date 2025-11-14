@@ -29,6 +29,7 @@ const openButton = document.querySelector('#open-missing');
 const progressText = document.querySelector('#progress-text');
 const progressFill = document.querySelector('#progress-fill');
 const harvestList = document.querySelector('.harvest-list');
+const pendingCountText = document.querySelector('#pending-count');
 
 let normalizedIndex = [];
 let archiveData = { byId: new Map(), mediaCount: 0, metaCount: 0, errors: [] };
@@ -49,6 +50,9 @@ function renderHarvestList() {
   harvestList.innerHTML = '';
   if (normalizedIndex.length === 0) {
     harvestList.innerHTML = '<div class="notice">Load an index to view missing items.</div>';
+    if (pendingCountText) {
+      pendingCountText.textContent = 'Load an index to calculate pending items.';
+    }
     return;
   }
 
@@ -92,6 +96,16 @@ function renderHarvestList() {
 
   if (missingCount === 0) {
     harvestList.innerHTML = '<div class="notice"><strong>All caught up!</strong> Every item in the index has a matching offline file.</div>';
+  }
+
+  if (pendingCountText) {
+    const total = normalizedIndex.length;
+    if (missingCount === 0) {
+      pendingCountText.textContent = `All caught up — 0 items pending harvest out of ${total}.`;
+    } else {
+      const noun = missingCount === 1 ? 'item' : 'items';
+      pendingCountText.textContent = `${missingCount} ${noun} pending harvest out of ${total}.`;
+    }
   }
 }
 
