@@ -13,7 +13,18 @@ const THUMB_KEYS = [
   'poster'
 ];
 const URL_KEYS = ['href', 'url', 'pageUrl', 'link'];
-const PROMPT_KEYS = ['prompt', 'caption', 'description', 'text'];
+const PROMPT_KEYS = [
+  'prompt',
+  'Prompt',
+  'caption',
+  'Caption',
+  'description',
+  'Description',
+  'text',
+  'Text',
+  'story',
+  'Story'
+];
 
 /**
  * Extracts the canonical Sora generation id from any string value.
@@ -75,6 +86,19 @@ function findPrompt(obj) {
     const value = obj[key];
     if (typeof value === 'string' && value.trim()) {
       return value.trim();
+    }
+  }
+  return null;
+}
+
+function deepFindPrompt(obj, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 4) return null;
+  const direct = findPrompt(obj);
+  if (direct) return direct;
+  for (const value of Object.values(obj)) {
+    if (value && typeof value === 'object') {
+      const nested = deepFindPrompt(value, depth + 1);
+      if (nested) return nested;
     }
   }
   return null;
@@ -210,14 +234,16 @@ export async function loadDefaultIndex(url = 'sora_gallery_index.json') {
  * @returns {string}
  */
 export function resolvePrompt(entry, meta) {
-  if (meta && typeof meta.Prompt === 'string' && meta.Prompt.trim()) {
-    return meta.Prompt.trim();
+  if (meta) {
+    const metaPrompt = deepFindPrompt(meta);
+    if (metaPrompt) return metaPrompt;
   }
   if (entry && typeof entry.prompt === 'string' && entry.prompt.trim()) {
     return entry.prompt.trim();
   }
-  if (entry?.original && typeof entry.original.prompt === 'string') {
-    return entry.original.prompt.trim();
+  if (entry?.original) {
+    const originalPrompt = deepFindPrompt(entry.original);
+    if (originalPrompt) return originalPrompt;
   }
   return '';
 }
