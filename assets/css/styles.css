@@ -109,6 +109,24 @@ button.ghost,
   min-height: 44px;
 }
 
+.top-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.top-nav .button-link {
+  min-height: 40px;
+  padding: 8px 14px;
+}
+
+.button-link.current {
+  background: rgba(77, 171, 247, 0.16);
+  color: var(--text-color);
+  border-color: var(--accent-color);
+}
+
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;

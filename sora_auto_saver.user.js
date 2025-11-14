@@ -249,17 +249,17 @@
   }
 
   async function runDownloadFlow() {
-    const id = getGenerationId();
-    if (!id) throw new Error('Could not determine generation id from URL.');
+    const genId = getGenerationId();
+    if (!genId) throw new Error('Could not determine generation id from URL.');
     updateStatus('Locating media…');
     const media = await waitForMedia();
     updateStatus('Capturing prompt…');
     const prompt = extractPromptText();
     const sanitizedPrompt = sanitizeForFilename(prompt) || 'asset';
-    const baseName = `gen_${id}--${sanitizedPrompt}`;
+    const baseName = `${genId}--${sanitizedPrompt}`;
     const extension = determineExtension(media.url, media.kind);
     const mediaFileName = `${baseName}.${extension}`;
-    const metaFileName = `gen_${id}.meta.json`;
+    const metaFileName = `${genId}.meta.json`;
 
     updateStatus('Downloading media…');
     let mediaResponse;
@@ -280,10 +280,11 @@
     triggerDownload(mediaBlob, mediaFileName);
 
     const meta = {
+      GenerationId: genId,
       SourceURL: window.location.href,
       AssetURL: media.url,
       Prompt: prompt,
-      Title: sanitizedPrompt.replace(/_/g, ' ').slice(0, 80) || id,
+      Title: sanitizedPrompt.replace(/_/g, ' ').slice(0, 80) || genId,
       Kind: media.kind,
       SuggestedBaseName: baseName
     };
