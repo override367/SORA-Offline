@@ -69,12 +69,13 @@ p.lead {
   gap: 12px;
 }
 
-button, input, label {
+button, .button-link, input, label {
   font-family: inherit;
   font-size: 1rem;
 }
 
-button {
+button,
+.button-link {
   appearance: none;
   border: 1px solid transparent;
   border-radius: 12px;
@@ -86,16 +87,26 @@ button {
   transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
-button.secondary {
+button.secondary,
+.button-link.secondary {
   background: rgba(77, 171, 247, 0.08);
   color: var(--text-color);
   border-color: var(--accent-color);
 }
 
-button.ghost {
+button.ghost,
+.button-link.ghost {
   background: transparent;
   border-color: var(--border-color);
   color: var(--text-muted);
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  min-height: 44px;
 }
 
 button:disabled {
@@ -103,9 +114,17 @@ button:disabled {
   cursor: not-allowed;
 }
 
-button:hover:not(:disabled) {
+button:hover:not(:disabled),
+.button-link:hover {
   transform: translateY(-1px);
   box-shadow: 0 10px 24px rgba(77, 171, 247, 0.25);
+}
+
+.header-actions {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 input[type="text"], input[type="number"], input[type="search"], input[type="checkbox"] {

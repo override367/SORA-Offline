@@ -262,7 +262,17 @@
     const metaFileName = `gen_${id}.meta.json`;
 
     updateStatus('Downloading media…');
-    const mediaResponse = await fetch(media.url, { credentials: 'include' });
+    let mediaResponse;
+    try {
+      mediaResponse = await fetch(media.url, {
+        mode: 'cors',
+        credentials: 'omit'
+      });
+    } catch (networkError) {
+      console.warn('Initial media fetch failed, retrying without explicit CORS options.', networkError);
+      mediaResponse = await fetch(media.url);
+    }
+
     if (!mediaResponse.ok) {
       throw new Error(`Failed to download media (${mediaResponse.status}).`);
     }
