@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sora Archive Kit — Gallery</title>
+    <link rel="stylesheet" href="assets/css/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Sora Archive Kit</h1>
+        <p class="lead">Browse your Sora gallery offline, keep track of what’s saved locally, and jump back online when needed.</p>
+      </header>
+
+      <section class="controls">
+        <div class="controls-grid">
+          <div>
+            <div class="actions">
+              <button id="load-index-button" class="secondary" type="button">Load index file…</button>
+              <input id="index-file-input" type="file" accept=".json,.txt" hidden />
+              <button id="connect-folder" type="button">Connect archive folder…</button>
+            </div>
+            <p id="index-status" class="notice" data-state="info">Waiting for index…</p>
+            <p id="archive-status" class="notice" data-state="info">Archive folder not connected.</p>
+          </div>
+          <div>
+            <label class="inline" for="search">Search</label>
+            <input id="search" type="search" placeholder="Filter by id, prompt, or metadata" />
+          </div>
+          <div>
+            <label class="inline" for="prefer-offline">
+              <input id="prefer-offline" type="checkbox" />
+              Prefer offline media when available
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <section class="status-bar">
+        <div class="stats"></div>
+        <div id="archive-notice" class="notice" hidden>
+          <strong>Heads up:</strong> Reconnect your archive folder if thumbnails look empty.
+        </div>
+      </section>
+
+      <section class="gallery-grid"></section>
+
+      <footer>
+        Built for the Sora Archive Kit workflow. Everything runs locally in your browser.
+      </footer>
+    </main>
+    <script type="module" src="assets/js/index.js"></script>
+  </body>
+</html>
