@@ -1,0 +1,3122 @@
+
+Show 20 more messages (42 hidden)
+You said:
+Uploaded image
+https://sora.chatgpt.com/g/gen_01k8pw3sp7fq2rvmwjsbnsyy6y?auto=1
+
+Doesnt do shit, it opens the image but nothing else happens
+ChatGPT said:
+
+Thought for 31s
+Got you—let’s brute-force this. Right now your tab opens the item page, but the saver isn’t firing. That means either (A) the userscript isn’t matching the page, or (B) it’s matching but can’t “see” the asset yet (lazy render / shadow DOM), or (C) Chrome is blocking the download gesture.
+
+Here’s a dead-simple way to get past all three.
+
+1) Replace your Tampermonkey code with this minimal, loud, hard-to-kill version
+It:
+
+Matches any host that uses /g/<id> pages.
+
+Shows a green status bar so you know it’s running.
+
+Waits up to ~15s, pierces shadow DOM, and grabs video or image URLs.
+
+First tries fetch→blob→download; if CORS blocks that, it opens the asset in a new tab (Chrome then lets you save or it autostarts).
+
+Works with ?auto=1 (closes tab after saving).
+
+Replace your script with this:
+
+// ==UserScript==
+// @name         Sora Auto Saver — loud + robust
+// @namespace    amelia/sora
+// @version      3.0
+// @description  Download media + prompt from Sora /g/<id> pages; auto mode with ?auto=1
+// @match        https://sora.chatgpt.com/g/*
+// @match        *://*/g/*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // UI banner so you KNOW it's running
+  const bar = document.createElement('div');
+  bar.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;background:#0b3;color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 monospace;box-shadow:0 2px 10px rgba(0,0,0,.4)';
+  document.documentElement.appendChild(bar);
+  const set = t => bar.textContent = 'Sora Saver: ' + t;
+
+  // Deep query that can pierce shadow roots
+  function* deepNodes(root = document) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let n;
+    while ((n = walker.nextNode())) {
+      yield n;
+      const sr = n.shadowRoot;
+      if (sr) yield* deepNodes(sr);
+    }
+  }
+
+  async function waitForAsset(timeoutMs = 15000) {
+    const t0 = performance.now();
+    while (performance.now() - t0 < timeoutMs) {
+      // Prefer <video> (originals) else <img>
+      for (const el of deepNodes()) {
+        if (el.tagName === 'VIDEO') {
+          const src = el.currentSrc || el.src || (el.querySelector('source') && el.querySelector('source').src);
+          if (src) return { url: src, kind: 'video' };
+        }
+        if (el.tagName === 'IMG') {
+          const src = el.currentSrc || el.src;
+          if (src && !src.startsWith('data:')) return { url: src, kind: 'image' };
+        }
+      }
+      set('looking for media…');
+      await sleep(300);
+    }
+    return null;
+  }
+
+  function guessId() {
+    const m = location.pathname.match(/\/g\/([^\/?#]+)/);
+    return m ? m[1] : 'item';
+  }
+
+  function sanitize(s) {
+    return (s || '').replace(/[\\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 120);
+  }
+
+  async function fetchPrompt(timeoutMs = 4000) {
+    // Try visible nodes first
+    for (const el of deepNodes()) {
+      const t = el.getAttribute?.('data-prompt') || el.getAttribute?.('aria-label') || el.getAttribute?.('title') || (el.textContent || '');
+      if (t && t.length > 15 && /[ ,.;:!?]/.test(t)) return t.trim();
+    }
+    // Give network a moment for any JSON bootstraps
+    await sleep(timeoutMs);
+    // Second pass again (sometimes prompt appears late)
+    for (const el of deepNodes()) {
+      const t = el.getAttribute?.('data-prompt') || el.getAttribute?.('aria-label') || el.getAttribute?.('title') || (el.textContent || '');
+      if (t && t.length > 15 && /[ ,.;:!?]/.test(t)) return t.trim();
+    }
+    return '';
+  }
+
+  async function download(url, filename) {
+    // Try blob download
+    try {
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const ct = res.headers.get('content-type') || '';
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+      return true;
+    } catch (e) {
+      // Fallback: open raw asset (lets browser handle it)
+      const a = document.createElement('a');
+      a.href = url; a.target = '_blank'; a.rel = 'noopener';
+      a.click();
+      return false;
+    }
+  }
+
+  async function run(auto) {
+    set('initializing…');
+    const id = guessId();
+
+    const asset = await waitForAsset();
+    if (!asset) { set('no media found'); return; }
+    set('media found');
+
+    const prompt = await fetchPrompt();
+    const base = id + (prompt ? ('--' + sanitize(prompt)) : '');
+
+    const ext = (() => {
+      const m = asset.url.match(/\.(mp4|webm|mov|m4v|jpg|jpeg|png|webp)(?=[?#]|$)/i);
+      if (m) return '.' + m[1].toLowerCase();
+      return asset.kind === 'video' ? '.mp4' : '.jpg';
+    })();
+
+    // media
+    const ok = await download(asset.url, base + ext);
+    set(ok ? 'downloaded media' : 'opened asset tab (CORS)');
+
+    // sidecar JSON (prompt + source URL + asset URL)
+    const meta = {
+      SourceURL: location.href,
+      AssetURL: asset.url,
+      Prompt: prompt || '',
+      Title: sanitize(prompt || ''),
+      Kind: asset.kind,
+      SuggestedBaseName: base
+    };
+    const sidecar = new Blob([JSON.stringify(meta, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(sidecar);
+    a.download = id + '.meta.json';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+
+    set('done ✓');
+    if (auto) { await sleep(1200); window.close(); }
+  }
+
+  // Manual button (in case you want to click)
+  const btn = document.createElement('button');
+  btn.textContent = 'Download with Prompt';
+  btn.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;background:#134;color:#fff;border:0;padding:8px 12px;border-radius:8px;cursor:pointer';
+  btn.onclick = () => run(false);
+  document.documentElement.appendChild(btn);
+
+  const auto = /[?&]auto=1/.test(location.search);
+  if (auto) run(true);
+  else set('ready (click the button or use ?auto=1)');
+})();
+What you should see on an item page:
+
+A green “Sora Saver: …” status tag in the top-left.
+
+A “Download with Prompt” button.
+
+With ?auto=1 → it runs by itself, downloads (or opens asset tab), saves a *.meta.json, then closes.
+
+If you don’t see the green bar, your @match still isn’t catching—add a specific line for the exact host in your URL:
+
+// @match  https://sora.chatgpt.com/g/*
+Then hard-refresh.
+
+2) Turn on the two browser allowances (one-time)
+On sora.chatgpt.com site settings:
+
+Automatic downloads → Allow
+
+Pop-ups and redirects → Allow (for batch opening)
+
+Chrome → Settings → Downloads:
+
+Pick your Download location (where the offline viewer scans)
+
+Consider turning off “Ask where to save each file” so batches don’t prompt.
+
+3) Make sure the offline viewer is pointed right
+Base URL in the viewer: https://sora.chatgpt.com
+
+Connect downloads folder… to the same folder Chrome is using.
+
+Use Open MISSING (auto-save) in batches of ~25–50.
+
+4) Quick console test (if you want to sanity-check the page)
+On a Sora item, open DevTools → Console, paste:
+
+(()=>{const v=document.querySelector('video'); const i=document.querySelector('img');
+console.log('video:', v?.currentSrc || v?.src);
+console.log('image:', i?.currentSrc || i?.src);})();
+If both lines log undefined, the media is inside shadow DOM—the new script above already pierces that and waits.
+
+If this still “does nothing,” send me the exact item URL (host + path) from your address bar. I’ll give you a laser-accurate @match line and we’ll hammer it home.
+
+You said:
+Great so its working, but when I run the thing its going to have to live forever in my downloads folder unsorted? thats horrific I have 1100 images in here
+ChatGPT said:
+
+Thought for 29s
+
+Analyzed
+Always show details
+
+# Create an offline organizer app that moves downloaded Sora files from your Downloads folder into a tidy archive.
+organizer_html = r"""
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sora Organizer — Move Downloads into a Tidy Library</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{ --bg:#0b0f16; --fg:#e9ecf1; --card:#111723; --muted:#9fb3c8; --accent:#7dd3fc; --border:#223040; --ok:#34d399; --warn:#f59e0b; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui}
+  header{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--border);padding:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .title{font-weight:700;margin-right:auto}
+  button,input,select{background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px 10px}
+  main{display:grid;grid-template-columns:1fr;gap:12px;padding:12px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px}
+  .small{font-size:12px;color:var(--muted)}
+  .ok{color:var(--ok)} .warn{color:var(--warn)}
+  progress{width:240px;height:18px}
+</style>
+</head>
+<body>
+<header>
+  <div class="title">Sora Organizer — Move Downloads into a Tidy Library</div>
+  <button id="pickSrc">Pick SOURCE (your Downloads)</button>
+  <button id="pickDst">Pick DESTINATION (your Library)</button>
+  <select id="mode">
+    <option value="per-id" selected>Per-ID folders (gen_xxx/)</option>
+    <option value="flat">Flat: rename files only</option>
+    <option value="by-month">By month (YYYY-MM subfolders)</option>
+  </select>
+  <button id="scan">Scan</button>
+  <button id="apply" disabled>Apply moves</button>
+  <progress id="prog" value="0" max="100"></progress><span id="ptext"></span>
+</header>
+<main>
+  <div class="row small">
+    <div>Rules:</div>
+    <ul>
+      <li>Pairs media with its sidecar <code>{id}.meta.json</code>.</li>
+      <li>Destination file name is taken from <code>SuggestedBaseName</code> in the sidecar (falls back to current name).</li>
+      <li>“Per-ID” → creates <code>gen_xxx/</code> and puts media + sidecar together.</li>
+      <li>“By month” uses the file’s lastModified time.</li>
+    </ul>
+  </div>
+  <div id="plan" class="grid"></div>
+</main>
+
+<script>
+let SRC=null, DST=null, PLAN=[];
+
+const prog=document.getElementById('prog'), ptext=document.getElementById('ptext');
+const planDiv=document.getElementById('plan'), modeSel=document.getElementById('mode');
+
+const isMedia = n => /\.(mp4|webm|mov|m4v|jpg|jpeg|png|webp|gif)$/i.test(n);
+const isSidecar = n => /\.meta\.json$/i.test(n);
+const idFrom = s => { const m=(s||'').match(/(gen_[A-Za-z0-9_-]+)/); return m?m[1]:null; };
+
+document.getElementById('pickSrc').onclick=async()=>{ try{ SRC=await window.showDirectoryPicker(); }catch{} };
+document.getElementById('pickDst').onclick=async()=>{ try{ DST=await window.showDirectoryPicker({ mode:'readwrite' }); }catch{} };
+
+document.getElementById('scan').onclick=async()=>{
+  if(!SRC){ alert('Pick SOURCE (Downloads) first'); return; }
+  PLAN=[]; planDiv.innerHTML=''; prog.value=0; ptext.textContent='Scanning…';
+  const files = await walk(SRC);
+  // Build maps
+  const media=[], sidecars=new Map();
+  for(const f of files){
+    if (isMedia(f.name)) media.push(f);
+    else if (isSidecar(f.name)) sidecars.set(idFrom(f.name) || f.name.replace(/\.meta\.json$/,''), f);
+  }
+  // Pair up
+  for (const f of media){
+    const id = idFrom(f.name) || null;
+    // read sidecar if exists for better naming
+    let base = f.name.replace(/\.(\w+)$/,'');
+    let side = id? sidecars.get(id) : null;
+    let promptTitle = '';
+    if (side){
+      try{
+        const jf = await side.handle.getFile();
+        const meta = JSON.parse(await jf.text());
+        if (meta.SuggestedBaseName) base = meta.SuggestedBaseName;
+        promptTitle = (meta.Title || meta.Prompt || '').slice(0,100);
+      }catch{}
+    }
+    PLAN.push({ media:f, side, id, base, promptTitle });
+  }
+  renderPlan();
+};
+
+function cardFor(it, destPath){
+  const d=document.createElement('div'); d.className='card';
+  const h=document.createElement('div'); h.innerHTML=`<b>${it.media.name}</b><div class="small">${it.media.path}</div>`;
+  const to=document.createElement('div'); to.innerHTML=`→ <b>${destPath}</b>`;
+  if (!it.side){ const warn=document.createElement('div'); warn.className='warn small'; warn.textContent='No sidecar found'; d.appendChild(warn); }
+  d.appendChild(h); d.appendChild(to);
+  if (it.promptTitle){ const s=document.createElement('div'); s.className='small'; s.textContent='Title: '+it.promptTitle; d.appendChild(s); }
+  return d;
+}
+
+function renderPlan(){
+  planDiv.innerHTML='';
+  const mode = modeSel.value;
+  for(const it of PLAN){
+    const ext = it.media.name.split('.').pop();
+    let folder='';
+    if (mode==='per-id' && it.id) folder = it.id+'/';
+    else if (mode==='by-month'){ const d = new Date(it.media.file.lastModified||Date.now()); const ym = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}/`; folder = ym; }
+    const dest = folder + it.base + '.' + ext;
+    it.dest = dest;
+    planDiv.appendChild(cardFor(it, dest));
+  }
+  document.getElementById('apply').disabled = !DST || PLAN.length===0;
+  ptext.textContent = `Planned ${PLAN.length} moves`;
+}
+
+async function walk(dirHandle, sub=''){
+  const out=[];
+  for await (const [name, h] of dirHandle.entries()){
+    if (h.kind==='file'){
+      const file = await h.getFile();
+      out.push({ name, handle:h, path: sub? (sub+'/'+name):name, file });
+    }else if (h.kind==='directory'){
+      out.push(...await walk(h, sub? (sub+'/'+name):name));
+    }
+  }
+  return out;
+}
+
+document.getElementById('apply').onclick=async()=>{
+  if(!DST){ alert('Pick DESTINATION first'); return; }
+  prog.max = PLAN.length; prog.value=0; ptext.textContent='Moving…';
+  let i=0;
+  for(const it of PLAN){
+    const parts = it.dest.split('/'); const fname = parts.pop();
+    let parent = DST;
+    for(const p of parts){ parent = await (await parent.getDirectoryHandle(p, { create:true })); }
+    // copy media
+    await copyFile(it.media.handle, parent, fname);
+    // copy sidecar (if any) next to media, name by id
+    if (it.side){
+      const scName = (it.id || it.base) + '.meta.json';
+      await copyFile(it.side.handle, parent, scName);
+    }
+    // Optionally delete originals (ask)
+    i++; prog.value=i; ptext.textContent=`${i} / ${PLAN.length}`;
+  }
+  alert('Done! You can safely clean up your Downloads now.');
+};
+
+async function copyFile(srcHandle, dstDir, newName){
+  const srcFile = await srcHandle.getFile();
+  const dst = await dstDir.getFileHandle(newName, { create:true });
+  const w = await dst.createWritable();
+  await w.write(await srcFile.arrayBuffer());
+  await w.close();
+}
+</script>
+</body>
+</html>
+"""
+open('/mnt/data/sora_organizer.html','w',encoding='utf-8').write(organizer_html)
+print("Created organizer at /mnt/data/sora_organizer.html")
+
+# Provide simple PowerShell and Bash one-shot sorters as files, too.
+ps = r"""
+# Sora Sorter (PowerShell) — run inside your Downloads folder (or set $Src/$Dst)
+Param(
+  [string]$Src = ".",
+  [string]$Dst = "$HOME\SoraLibrary",
+  [ValidateSet("per-id","flat","by-month")] [string]$Mode = "per-id"
+)
+New-Item -ItemType Directory -Force -Path $Dst | Out-Null
+
+function Get-Id([string]$name){ if ($name -match "(gen_[A-Za-z0-9_-]+)") { return $Matches[1] } return $null }
+
+$media = Get-ChildItem -Recurse $Src -File -Include *.mp4,*.webm,*.mov,*.m4v,*.jpg,*.jpeg,*.png,*.webp,*.gif
+foreach($m in $media){
+  $id = Get-Id $m.Name
+  $metaPath = $null
+  if ($id) {
+    $meta = Get-ChildItem -Recurse $Src -File -Filter "$id.meta.json" | Select-Object -First 1
+    if ($meta) { $metaPath = $meta.FullName }
+  }
+  $base = [System.IO.Path]::GetFileNameWithoutExtension($m.Name)
+  if ($metaPath){
+    try{
+      $json = Get-Content $metaPath -Raw | ConvertFrom-Json
+      if ($json.SuggestedBaseName) { $base = $json.SuggestedBaseName }
+    } catch {}
+  }
+  $ext = $m.Extension
+  $destDir = $Dst
+  if ($Mode -eq "per-id" -and $id) { $destDir = Join-Path $Dst $id }
+  elseif ($Mode -eq "by-month") {
+    $ym = Get-Date $m.LastWriteTime -Format "yyyy-MM"
+    $destDir = Join-Path $Dst $ym
+  }
+  New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+  $dest = Join-Path $destDir ($base + $ext)
+  Move-Item -LiteralPath $m.FullName -Destination $dest -Force
+  if ($metaPath) { Move-Item -LiteralPath $metaPath -Destination (Join-Path $destDir ($id + ".meta.json")) -Force }
+}
+Write-Host "Sorted $($media.Count) files into $Dst"
+"""
+open('/mnt/data/sora_sorter.ps1','w',encoding='utf-8').write(ps)
+
+bash = r"""#!/usr/bin/env bash
+# Sora Sorter (bash) — run inside your Downloads folder (or set SRC/DST/MODE)
+SRC="${SRC:-.}"
+DST="${DST:-$HOME/SoraLibrary}"
+MODE="${MODE:-per-id}" # per-id | flat | by-month
+mkdir -p "$DST"
+
+get_id() {
+  if [[ "$1" =~ (gen_[A-Za-z0-9_-]+) ]]; then echo "${BASH_REMATCH[1]}"; else echo ""; fi
+}
+
+shopt -s globstar nullglob
+for m in "$SRC"/**/*.{mp4,webm,mov,m4v,jpg,jpeg,png,webp,gif}; do
+  [[ -e "$m" ]] || continue
+  filename="$(basename "$m")"
+  id="$(get_id "$filename")"
+  meta=""
+  [[ -n "$id" && -e "$SRC"/**/"$id.meta.json" ]] && meta="$(ls "$SRC"/**/"$id.meta.json" | head -n1)"
+  base="${filename%.*}"
+  if [[ -n "$meta" ]]; then
+    title=$(jq -r '.SuggestedBaseName // empty' "$meta" 2>/dev/null)
+    [[ -n "$title" ]] && base="$title"
+  fi
+  ext="${filename##*.}"
+  destDir="$DST"
+  if [[ "$MODE" == "per-id" && -n "$id" ]]; then destDir="$DST/$id"
+  elif [[ "$MODE" == "by-month" ]]; then
+    ym=$(date -r "$m" "+%Y-%m")
+    destDir="$DST/$ym"
+  fi
+  mkdir -p "$destDir"
+  mv -f "$m" "$destDir/$base.$ext"
+  if [[ -n "$meta" ]]; then
+    mv -f "$meta" "$destDir/$id.meta.json"
+  fi
+done
+echo "Sorted files into $DST"
+"""
+open('/mnt/data/sora_sorter.sh','w',encoding='utf-8').write(bash)
+print("Created organizer + scripts:\n - /mnt/data/sora_organizer.html\n - /mnt/data/sora_sorter.ps1\n - /mnt/data/sora_sorter.sh")
+STDOUT/STDERR
+Created organizer at /mnt/data/sora_organizer.html
+Created organizer + scripts:
+ - /mnt/data/sora_organizer.html
+ - /mnt/data/sora_sorter.ps1
+ - /mnt/data/sora_sorter.sh
+Totally fair — dumping 1,100 files into Downloads is chaos. We can fix the after part (organize/move/rename) even though the browser must save there first.
+
+You’ve got three clean options. Pick the one that fits your vibe:
+
+A) One-click organizer (runs in your browser)
+Use my little app to move/rename everything out of Downloads into a tidy library — per-ID folders, flat, or by month.
+
+Download sora_organizer.html
+
+How:
+
+Open it → Pick SOURCE (your Downloads) → Pick DESTINATION (your Sora Library folder).
+
+Choose a mode:
+
+Per-ID folders (gen_…/media + gen_….meta.json)
+
+Flat (just renames nicely)
+
+By month (YYYY-MM/…)
+
+Click Scan → review the plan → Apply moves.
+It pairs media with its {id}.meta.json, uses the nice SuggestedBaseName from the sidecar, and copies both to the destination (safe copy; originals remain until you clean them).
+
+B) PowerShell sorter (Windows, super fast)
+Download sora_sorter.ps1
+
+From PowerShell:
+
+# Option 1: run inside your Downloads
+.\sora_sorter.ps1
+
+# Option 2: specify folders and layout
+.\sora_sorter.ps1 -Src "C:\Users\You\Downloads" -Dst "D:\SoraLibrary" -Mode per-id
+# Modes: per-id | flat | by-month
+It moves each media + matching {id}.meta.json to your library, renaming from the sidecar’s SuggestedBaseName (what the saver script produced).
+
+C) Bash sorter (macOS/Linux)
+Download sora_sorter.sh
+
+chmod +x sora_sorter.sh
+# inside Downloads
+./sora_sorter.sh
+# or specify:
+SRC=~/Downloads DST=~/SoraLibrary MODE=per-id ./sora_sorter.sh
+Tips so this stays clean going forward
+In Chrome → Settings → Downloads:
+
+Set Download location to a staging folder like C:\SoraStaging or ~/SoraStaging.
+
+Turn Ask where to save OFF for hands-free batches.
+
+After each harvest run, launch the Organizer or the sorter script; it will:
+
+Move media + sidecars into your permanent SoraLibrary
+
+Keep a predictable structure you can back up
+
+In the Offline-First Viewer, point Connect downloads folder… to your SoraLibrary instead of Downloads — it will show Offline ✓ immediately.
+
+If you want a different folder layout (e.g., Character/Scene/ based on prompt keywords, or split images/ vs videos/), tell me your rules and I’ll customize the organizer to sort that way automatically.
+
+
+
+You said:
+Cant I just fucking download them all and put them in my c:\soraimagedownload\images folder and put the html file in c:\soraimagedownload isnt this making things e
+
+this...
+
+Feels dramatically overcomplicated
+
+Also isnt there any fuckin way to load what i need in my offline viewer and then when i close it and reopen it later its open already, i have to manually browse to the json every time because whatever this is is going to fucking probably scatter all the images already in my downloads folder to the winds
+
+The *ideal* workflow would be fore me to open the offline viewer, hit the button to download, have it download them all, then move them to .\images (relative to the html file) but IDK if you can do that
+ChatGPT said:
+
+Thought for 20s
+
+Analyzed
+Always show details
+
+# Create a super-simple viewer that auto-loads a colocated JSON and prefers a sibling ./images folder.
+simple_viewer = r"""
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sora Simple Viewer (drop-in folder)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{ --bg:#0b0f16; --fg:#e9ecf1; --card:#111723; --muted:#9fb3c8; --accent:#7dd3fc; --border:#223040; --btn:#173042; }
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui}
+  header{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--border);padding:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .title{font-weight:700;margin-right:auto}
+  button,input{background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px 10px}
+  #grid{padding:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+  .thumb{width:100%;aspect-ratio:1/1;object-fit:cover;display:block}
+  .meta{padding:8px 10px;color:var(--muted);display:flex;gap:8px;align-items:center}
+  .meta a{color:var(--accent);text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:65%}
+  .prompt{padding:8px 10px;border-top:1px dashed var(--border);max-height:8em;overflow:auto;white-space:pre-wrap}
+  .ok{color:#34d399}
+</style>
+</head>
+<body>
+<header>
+  <div class="title">Sora Simple Viewer</div>
+  <button id="grant">Grant access to ./images</button>
+  <button id="reloadJson">Reload JSON</button>
+  <span id="status"></span>
+</header>
+<div id="grid"></div>
+
+<script>
+const statusEl = document.getElementById('status');
+const grid = document.getElementById('grid');
+
+let DATA = [];
+let IMG_DIR = null; // FileSystemDirectoryHandle
+let OFFLINE = new Map(); // id -> file handle
+
+const isMedia = n => /\.(mp4|webm|mov|m4v|jpg|jpeg|png|webp|gif)$/i.test(n);
+const idFrom = s => { const m=(s||'').match(/(gen_[A-Za-z0-9_-]+)/); return m?m[1]:null; };
+
+function log(t){ statusEl.textContent = t; }
+
+async function loadJson() {
+  // Try localStorage cache first
+  let text = localStorage.getItem('sora_json_text');
+  if (!text) {
+    // Try to fetch colocated file
+    try {
+      const res = await fetch('sora_gallery_index.json', {cache:'no-store'});
+      if (res.ok) text = await res.text();
+    } catch {}
+  }
+  if (!text) {
+    // ask user to pick JSON once
+    const [h] = await window.showOpenFilePicker({types:[{description:'JSON', accept:{'application/json':['.json']}}]});
+    const f = await h.getFile();
+    text = await f.text();
+    localStorage.setItem('sora_json_text', text);
+  }
+  try {
+    const j = JSON.parse(text);
+    DATA = Array.isArray(j) ? j : (Array.isArray(j.urls) ? j.urls : []);
+  } catch {
+    DATA = text.split(/\r?\n/).filter(Boolean).map(u=>({href:u,thumb:u}));
+  }
+  // normalize
+  DATA = DATA.map(x=>{
+    if (typeof x==='string') return {href:x,thumb:x,id:idFrom(x),prompt:null};
+    const href=x.href||x.url||x.link||x.thumb||'';
+    const thumb=x.thumb||x.url||x.image||x.src||href;
+    const prompt=x.prompt||x.caption||x.text||'';
+    return {href,thumb,id:idFrom(href||thumb),prompt};
+  });
+}
+
+async function grantImagesDir(){
+  try{
+    IMG_DIR = await window.showDirectoryPicker({id:'sora_images', mode:'read'});
+    localStorage.setItem('sora_img_dir', 'granted');
+    await scanImages();
+    render();
+  }catch(e){ log(e.message); }
+}
+
+async function scanImages(){
+  if(!IMG_DIR) return;
+  OFFLINE.clear();
+  for await (const [name, h] of IMG_DIR.entries()){
+    if (h.kind==='file' && isMedia(name)) {
+      const id = idFrom(name) || name.split('--')[0];
+      if (id) OFFLINE.set(id, h);
+    }
+  }
+  log(`Offline files: ${OFFLINE.size}`);
+}
+
+async function render(){
+  grid.innerHTML='';
+  for (const it of DATA){
+    const card=document.createElement('div'); card.className='card';
+    const imgEl = document.createElement(isMedia(it.thumb||'x.jpg') && /\.(mp4|webm|mov|m4v)$/i.test(it.thumb||'') ? 'video' : 'img');
+    imgEl.className='thumb'; imgEl.loading='lazy'; imgEl.decoding='async';
+    const h = it.id ? OFFLINE.get(it.id) : null;
+    if (h){
+      const f = await h.getFile();
+      const u = URL.createObjectURL(f);
+      if (imgEl.tagName==='VIDEO'){ imgEl.controls=true; imgEl.preload='metadata'; }
+      imgEl.src = u;
+    } else {
+      imgEl.src = it.thumb || it.href || '';
+    }
+    card.appendChild(imgEl);
+
+    const meta=document.createElement('div'); meta.className='meta';
+    const a=document.createElement('a'); a.href=it.href||'#'; a.target='_blank'; a.rel='noopener'; a.textContent=(it.href||'').slice(0,80);
+    meta.appendChild(a);
+    if (OFFLINE.get(it.id)){ const s=document.createElement('span'); s.className='ok'; s.textContent=' • offline ✓'; meta.appendChild(s); }
+    card.appendChild(meta);
+
+    if (it.prompt){ const p=document.createElement('div'); p.className='prompt'; p.textContent=it.prompt; card.appendChild(p); }
+
+    grid.appendChild(card);
+  }
+}
+
+document.getElementById('grant').onclick = grantImagesDir;
+document.getElementById('reloadJson').onclick = async ()=>{ localStorage.removeItem('sora_json_text'); await loadJson(); await scanImages(); render(); };
+
+(async()=>{
+  await loadJson();
+  log(`Items: ${DATA.length}. Click “Grant access to ./images”, then select your images folder.`);
+})();
+</script>
+</body>
+</html>
+"""
+open('/mnt/data/sora_simple_viewer.html','w',encoding='utf-8').write(simple_viewer)
+print("Created simple viewer at /mnt/data/sora_simple_viewer.html")
+STDOUT/STDERR
+Created simple viewer at /mnt/data/sora_simple_viewer.html
+You’re not wrong — we can make this way simpler and “just work” in one folder.
+
+The dead-simple setup you want
+Make one folder: C:\SoraImageDownload\
+Inside it, create:
+
+images\ ← where files land
+
+sora_gallery_index.json ← your exported JSON
+
+sora_simple_viewer.html ← drop-in offline viewer (below)
+
+Tell Chrome to save into C:\SoraImageDownload\images
+Settings → Downloads → Location = that folder
+(Turn OFF “Ask where to save each file” for one-click batches.)
+
+Run harvest (from your offline page or direct links).
+The Tampermonkey auto-saver will dump everything straight into .\images.
+
+Open the simple viewer from C:\SoraImageDownload\:
+It auto-loads sora_gallery_index.json from the same folder.
+Click “Grant access to ./images” once so it can show your offline thumbnails.
+Next time you open it: it remembers and just shows your stuff.
+
+Grab the simple viewer
+Download sora_simple_viewer.html
+
+Put it next to your sora_gallery_index.json inside C:\SoraImageDownload\.
+
+All your media sits in C:\SoraImageDownload\images\.
+
+The page uses local files for thumbnails (if granted) and your JSON for the links.
+
+No file picker every time; it caches the JSON text and will only ask again if you click Reload JSON.
+
+Why I didn’t try to “move after download” from the page
+Browsers don’t let pages/userscripts move files on disk arbitrarily (security). The clean workaround is exactly what you suggested: set Chrome’s download location to .\images before the batch. That way they land where you want them, and the viewer reads them in place.
+
+If you ever want to re-organize later (per-ID folders or by month), you still have my organizer/sorters — but you don’t need them for the happy-path.
+
+Tiny checklist (so it’s frictionless)
+Tampermonkey auto-saver is enabled and matches https://sora.chatgpt.com/g/*.
+
+Chrome → Automatic downloads allowed on sora.chatgpt.com.
+
+Downloads location = C:\SoraImageDownload\images.
+
+sora_gallery_index.json + sora_simple_viewer.html sit in C:\SoraImageDownload\.
+
+Open the viewer → click Grant access to ./images once → done.
+
+If you want the simple viewer to also open missing online with ?auto=1 (like the harvest page) I can add that button right into it, so it’s truly just one page, one folder, one button.
+
+
+
+You said:
+sora_offline_viewer_offlinefirst.html
+File
+Okay I ran your offline viewer thing, it opened like 50 tabs to thttps://cdn.openai.com/sora/images/profile_placeholder_v4.png a page containing just this and 50 to images and downloaded a json file for each of them, what do I do with this? it didnt download any images 
+
+If I manually open one and click your download button from the addon, it didnt download the image, just a json
+
+// ==UserScript==
+// @name         Sora Auto Saver — loud + robust
+// @namespace    amelia/sora
+// @version      3.0
+// @description  Download media + prompt from Sora /g/<id> pages; auto mode with ?auto=1
+// @match        https://sora.chatgpt.com/g/*
+// @match        *://*/g/*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // UI banner so you KNOW it's running
+  const bar = document.createElement('div');
+  bar.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;background:#0b3;color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 monospace;box-shadow:0 2px 10px rgba(0,0,0,.4)';
+  document.documentElement.appendChild(bar);
+  const set = t => bar.textContent = 'Sora Saver: ' + t;
+
+  // Deep query that can pierce shadow roots
+  function* deepNodes(root = document) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let n;
+    while ((n = walker.nextNode())) {
+      yield n;
+      const sr = n.shadowRoot;
+      if (sr) yield* deepNodes(sr);
+    }
+  }
+
+  async function waitForAsset(timeoutMs = 15000) {
+    const t0 = performance.now();
+    while (performance.now() - t0 < timeoutMs) {
+      // Prefer <video> (originals) else <img>
+      for (const el of deepNodes()) {
+        if (el.tagName === 'VIDEO') {
+          const src = el.currentSrc || el.src || (el.querySelector('source') && el.querySelector('source').src);
+          if (src) return { url: src, kind: 'video' };
+        }
+        if (el.tagName === 'IMG') {
+          const src = el.currentSrc || el.src;
+          if (src && !src.startsWith('data:')) return { url: src, kind: 'image' };
+        }
+      }
+      set('looking for media…');
+      await sleep(300);
+    }
+    return null;
+  }
+
+  function guessId() {
+    const m = location.pathname.match(/\/g\/([^\/?#]+)/);
+    return m ? m[1] : 'item';
+  }
+
+  function sanitize(s) {
+    return (s || '').replace(/[\\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 120);
+  }
+
+  async function fetchPrompt(timeoutMs = 4000) {
+    // Try visible nodes first
+    for (const el of deepNodes()) {
+      const t = el.getAttribute?.('data-prompt') || el.getAttribute?.('aria-label') || el.getAttribute?.('title') || (el.textContent || '');
+      if (t && t.length > 15 && /[ ,.;:!?]/.test(t)) return t.trim();
+    }
+    // Give network a moment for any JSON bootstraps
+    await sleep(timeoutMs);
+    // Second pass again (sometimes prompt appears late)
+    for (const el of deepNodes()) {
+      const t = el.getAttribute?.('data-prompt') || el.getAttribute?.('aria-label') || el.getAttribute?.('title') || (el.textContent || '');
+      if (t && t.length > 15 && /[ ,.;:!?]/.test(t)) return t.trim();
+    }
+    return '';
+  }
+
+  async function download(url, filename) {
+    // Try blob download
+    try {
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const ct = res.headers.get('content-type') || '';
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+      return true;
+    } catch (e) {
+      // Fallback: open raw asset (lets browser handle it)
+      const a = document.createElement('a');
+      a.href = url; a.target = '_blank'; a.rel = 'noopener';
+      a.click();
+      return false;
+    }
+  }
+
+  async function run(auto) {
+    set('initializing…');
+    const id = guessId();
+
+    const asset = await waitForAsset();
+    if (!asset) { set('no media found'); return; }
+    set('media found');
+
+    const prompt = await fetchPrompt();
+    const base = id + (prompt ? ('--' + sanitize(prompt)) : '');
+
+    const ext = (() => {
+      const m = asset.url.match(/\.(mp4|webm|mov|m4v|jpg|jpeg|png|webp)(?=[?#]|$)/i);
+      if (m) return '.' + m[1].toLowerCase();
+      return asset.kind === 'video' ? '.mp4' : '.jpg';
+    })();
+
+    // media
+    const ok = await download(asset.url, base + ext);
+    set(ok ? 'downloaded media' : 'opened asset tab (CORS)');
+
+    // sidecar JSON (prompt + source URL + asset URL)
+    const meta = {
+      SourceURL: location.href,
+      AssetURL: asset.url,
+      Prompt: prompt || '',
+      Title: sanitize(prompt || ''),
+      Kind: asset.kind,
+      SuggestedBaseName: base
+    };
+    const sidecar = new Blob([JSON.stringify(meta, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(sidecar);
+    a.download = id + '.meta.json';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+
+    set('done ✓');
+    if (auto) { await sleep(1200); window.close(); }
+  }
+
+  // Manual button (in case you want to click)
+  const btn = document.createElement('button');
+  btn.textContent = 'Download with Prompt';
+  btn.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;background:#134;color:#fff;border:0;padding:8px 12px;border-radius:8px;cursor:pointer';
+  btn.onclick = () => run(false);
+  document.documentElement.appendChild(btn);
+
+  const auto = /[?&]auto=1/.test(location.search);
+  if (auto) run(true);
+  else set('ready (click the button or use ?auto=1)');
+})();
+
+
+ChatGPT said:
+
+Thought for 5m 58s
+Yeah ok, this is doing exactly the wrong thing right now 😂
+Let’s untangle what happened and then I’ll give you one clean fix.
+What just happened
+Offline viewer “Open MISSING”
+Some of your JSON entries don’t point to /g/gen_… pages, they point straight at CDN images like
+https://cdn.openai.com/sora/images/profile_placeholder_v4.png.
+My viewer happily opened those too, so you got ~50 tabs of that placeholder and other raw assets.
+Those URLs are just images, not Sora item pages → the userscript does not run there, so no downloads.
+Userscript only saved JSON
+On actual /g/gen_... pages, the script is running (you see the green “Sora Saver” bar, right).
+But it uses fetch() + <a download> to grab the media, and the media lives on videos.openai.com (cross‑origin).
+Modern Chrome basically goes:
+“cute, but I’m ignoring your download request” → result: only the sidecar .meta.json gets saved.
+So:
+JSONs = sidecars with prompts/URLs.
+Images/videos = not actually being downloaded yet.
+Let’s fix both pieces.
+Step 1 — Fix the userscript so it actually saves media
+We’re going to let Tampermonkey handle the download with GM_download, which bypasses the CORS/download nonsense.
+Replace your script with this version
+In Tampermonkey, edit the script, delete its contents, and paste this whole thing:
+// ==UserScript==
+// @name         Sora Auto Saver — GM download version
+// @namespace    amelia/sora
+// @version      4.0
+// @description  Download media + prompt from Sora /g/<id> pages; auto mode with ?auto=1
+// @match        https://sora.chatgpt.com/g/*
+// @match        *://*/g/*
+// @grant        GM_download
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // status bar so you KNOW it's running
+  const bar = document.createElement('div');
+  bar.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;background:#0b3;color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 monospace;box-shadow:0 2px 10px rgba(0,0,0,.4)';
+  document.documentElement.appendChild(bar);
+  const set = t => bar.textContent = 'Sora Saver: ' + t;
+
+  // Deep walk, including shadow DOM
+  function* deepNodes(root = document) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let n;
+    while ((n = walker.nextNode())) {
+      yield n;
+      const sr = n.shadowRoot;
+      if (sr) yield* deepNodes(sr);
+    }
+  }
+
+  // Only treat real Sora media as valid assets, not UI icons / placeholders
+  async function waitForAsset(timeoutMs = 15000) {
+    const t0 = performance.now();
+    const isReal = (u) =>
+      u &&
+      /videos\.openai\.com|vg-assets|oaivg/i.test(u) &&
+      !/profile_placeholder/i.test(u);
+
+    while (performance.now() - t0 < timeoutMs) {
+      let fallback = null;
+
+      for (const el of deepNodes()) {
+        if (el.tagName === 'VIDEO') {
+          const src = el.currentSrc || el.src || (el.querySelector('source') && el.querySelector('source').src);
+          if (isReal(src)) return { url: src, kind: 'video' };
+          if (!fallback && src) fallback = { url: src, kind: 'video' };
+        }
+        if (el.tagName === 'IMG') {
+          const src = el.currentSrc || el.src;
+          if (isReal(src)) return { url: src, kind: 'image' };
+          if (!fallback && src && !src.startsWith('data:')) fallback = { url: src, kind: 'image' };
+        }
+      }
+
+      if (fallback) return fallback; // last resort; but usually we hit isReal first
+      set('looking for media…');
+      await sleep(300);
+    }
+    return null;
+  }
+
+  function guessId() {
+    const m = location.pathname.match(/\/g\/([^\/?#]+)/);
+    return m ? m[1] : 'item';
+  }
+
+  function sanitize(s) {
+    return (s || '').replace(/[\\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 120);
+  }
+
+  async function fetchPrompt(timeoutMs = 4000) {
+    for (const el of deepNodes()) {
+      const t = el.getAttribute?.('data-prompt') ||
+                el.getAttribute?.('aria-label') ||
+                el.getAttribute?.('title') ||
+                (el.textContent || '');
+      if (t && t.length > 15 && /[ ,.;:!?]/.test(t)) return t.trim();
+    }
+    await sleep(timeoutMs);
+    for (const el of deepNodes()) {
+      const t = el.getAttribute?.('data-prompt') ||
+                el.getAttribute?.('aria-label') ||
+                el.getAttribute?.('title') ||
+                (el.textContent || '');
+      if (t && t.length > 15 && /[ ,.;:!?]/.test(t)) return t.trim();
+    }
+    return '';
+  }
+
+  // Use Tampermonkey's GM_download so CORS/Origin can't ruin our life
+  async function download(url, filename) {
+    return new Promise((resolve) => {
+      try {
+        GM_download({
+          url,
+          name: filename,
+          saveAs: false,
+          onload: () => resolve(true),
+          ontimeout: () => resolve(false),
+          onerror: () => resolve(false),
+        });
+      } catch (e) {
+        resolve(false);
+      }
+    });
+  }
+
+  async function run(auto) {
+    set('initializing…');
+    const id = guessId();
+
+    const asset = await waitForAsset();
+    if (!asset) { set('no media found'); return; }
+    set('media found');
+
+    const prompt = await fetchPrompt();
+    const base = id + (prompt ? ('--' + sanitize(prompt)) : '');
+
+    const ext = (() => {
+      const m = asset.url.match(/\.(mp4|webm|mov|m4v|jpg|jpeg|png|webp)(?=[?#]|$)/i);
+      if (m) return '.' + m[1].toLowerCase();
+      return asset.kind === 'video' ? '.mp4' : '.jpg';
+    })();
+
+    // media
+    const ok = await download(asset.url, base + ext);
+    set(ok ? 'downloaded media' : 'could not auto-download media');
+
+    // sidecar JSON (prompt + source URL + asset URL)
+    const meta = {
+      SourceURL: location.href,
+      AssetURL: asset.url,
+      Prompt: prompt || '',
+      Title: sanitize(prompt || ''),
+      Kind: asset.kind,
+      SuggestedBaseName: base
+    };
+    const sidecar = new Blob([JSON.stringify(meta, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(sidecar);
+    a.download = id + '.meta.json';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+
+    set('done ✓');
+    if (auto) { await sleep(1200); window.close(); }
+  }
+
+  // Manual button
+  const btn = document.createElement('button');
+  btn.textContent = 'Download with Prompt';
+  btn.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;background:#134;color:#fff;border:0;padding:8px 12px;border-radius:8px;cursor:pointer';
+  btn.onclick = () => run(false);
+  document.documentElement.appendChild(btn);
+
+  const auto = /[?&]auto=1/.test(location.search);
+  if (auto) run(true);
+  else set('ready (click the button or use ?auto=1)');
+})();
+Important bits:
+@grant GM_download (no @grant none anymore).
+waitForAsset only likes URLs from videos.openai.com / vg-assets and ignores profile_placeholder_v4.png.
+Now test it on ONE item:
+Open https://sora.chatgpt.com/g/GEN_ID_HERE (no ?auto=1 yet).
+You should see:
+Green status bar.
+“Download with Prompt” button.
+Click the button → check your Downloads:
+You should see one media file (mp4/webp/jpg) and a gen_… .meta.json.
+If that works, then auto mode (?auto=1 and the offline viewer) will work too.
+Step 2 — Stop the offline viewer from opening CDN junk
+Your offline viewer’s “Open MISSING” currently opens everything that isn’t marked offline, including pure CDN links like the placeholder PNG. That’s why you saw so many profile_placeholder_v4.png tabs. The viewer HTML you uploaded has this block: 
+sora_offline_viewer_offlinefirst
+
+document.getElementById('openMissingAuto').addEventListener('click', async () => {
+  const limit = Math.max(1, Math.min(parseInt(limitInput.value||'40',10), FILTERED.length));
+  const delay = Math.max(150, parseInt(delayInput.value||'800',10));
+  const missing = FILTERED.filter(it => !(OFFLINE.get(it.id)?.files?.length));
+  const subset = missing.slice(0, limit);
+  prog.max = subset.length; prog.value = 0; progText.textContent = `0 / ${subset.length}`;
+
+  for (let i=0;i<subset.length;i++){
+    const it = subset[i];
+    let href = rebuildOnlineLink(it.href || it.thumb || '');
+    if (appendAuto.checked) href += (href.includes('?')?'&':'?') + 'auto=1';
+    window.open(href, '_blank', 'noopener');
+    prog.value = i+1; progText.textContent = `${i+1} / ${subset.length}`;
+    await sleep(delay);
+  }
+});
+Edit your sora_offline_viewer_offlinefirst.html in a text editor and replace that block with this version:
+document.getElementById('openMissingAuto').addEventListener('click', async () => {
+  const limit = Math.max(1, Math.min(parseInt(limitInput.value||'40',10), FILTERED.length));
+  const delay = Math.max(150, parseInt(delayInput.value||'800',10));
+  const missing = FILTERED.filter(it => !(OFFLINE.get(it.id)?.files?.length));
+  const subset = missing.slice(0, limit);
+  prog.max = subset.length; prog.value = 0; progText.textContent = `0 / ${subset.length}`;
+
+  let opened = 0;
+  for (let i = 0; i < subset.length; i++) {
+    const it = subset[i];
+
+    // Only open real Sora items that have an id → /g/gen_xxx
+    if (!it.id) continue;
+
+    let href = rebuildOnlineLink(it.href || it.thumb || '');
+    if (!href.includes('/g/')) continue;
+
+    if (appendAuto.checked) href += (href.includes('?') ? '&' : '?') + 'auto=1';
+    window.open(href, '_blank', 'noopener');
+    opened++;
+    prog.value = opened; progText.textContent = `${opened} / ${subset.length}`;
+    await sleep(delay);
+  }
+});
+This makes “Open MISSING” skip any entry that doesn’t resolve to a /g/gen_… item page, so it won’t spam CDN placeholder URLs anymore.
+Step 3 — What about all those .meta.json files already downloaded?
+Keep them. They already contain:
+SourceURL (the /g/gen_… page)
+AssetURL (whatever asset we found)
+Prompt, Title, etc.
+Once we have proper media files coming down, those sidecars will line up by gen_… id. They don’t break anything; worst case we ignore/delete the ones that correspond to placeholder only.
+Step 4 — Sanity checklist
+Before you try another batch:
+Tampermonkey
+New script pasted (with GM_download).
+Script enabled.
+On a /g/gen_… page you see green status bar + “Download with Prompt”.
+Chrome
+Settings → Downloads → Location = the folder you want (e.g. C:\SoraImageDownload\images).
+“Ask where to save each file” → OFF (so GM_download can just write).
+Site settings for sora.chatgpt.com:
+Automatic downloads: Allow
+Pop-ups: Allow (for batch mode).
+Offline viewer
+Base URL = https://sora.chatgpt.com.
+openMissingAuto block patched as above.
+Then: use one item first → verify you get an image file. Once that works, then run the batch again.
+If you want, we can ditch the offline viewer’s batch button entirely and instead have a tiny script that, from your JSON, generates a .bat file that opens each /g/gen_…?auto=1 with a delay. But if the new GM_download script works, you’re finally at “open viewer → Open MISSING → images actually land in your folder” territory, which is the dream.
+
+Sources
+You said:
+sora_offline_viewer_offlinefirst.html
+File
+okay it downloaded a bunch of images but they arent in here, they're in the images folder. Is there *ANY WAY* I can make this thing function less clunkily? It should automatically ingest sora_gallery_index.json when opened and grab or ask for access to \images
+
+ALso like, have it work, sometimes it opens that cdn image even if I click any of the links in the offline viewer it opens the actual image
+
+How about this, would it be easier if we re-did the scan of sora where it goes down my gallery bit by bit and captures the images like it did before when we made the json?
+
+Whatever you think is best to fit my use case
+ChatGPT said:
+
+Thought for 7m 11s
+Yeah, this whole thing has gotten way more “NASA mission control” than it needs to be 😅
+Let’s simplify what you already have instead of nuking it and rescrolling Sora. You’re in a good place now:
+Images are landing in C:\SoraImageDownload\images ✅
+You have sora_offline_viewer_offlinefirst.html next to sora_gallery_index.json ✅ 
+sora_offline_viewer_offlinefirst
+
+Now we just need to:
+Make the viewer auto‑load the JSON so you don’t have to browse to it.
+Point it at your images folder with one click each time.
+Stop it from opening those dumb CDN placeholder PNG tabs.
+1. Auto‑load sora_gallery_index.json next to the HTML
+Right now, the viewer only loads JSON when you use the file picker or that “Load sora_gallery_index.json” button, and fetch() from file:// is flaky. We can cache the JSON in localStorage so you only pick it once.
+Edit your HTML
+Open sora_offline_viewer_offlinefirst.html in a text editor (VS Code / Notepad++ / whatever). Inside the <script> block, find this function: 
+sora_offline_viewer_offlinefirst
+
+async function loadFile(file){
+  const text = await file.text();
+  const arr = await parseText(text);
+  DATA = arr.map(normItem);
+  applyFilter();
+}
+Replace it with this pair:
+async function applyJsonText(text) {
+  const arr = await parseText(text);
+  DATA = arr.map(normItem);
+  applyFilter();
+  // cache for next time
+  try {
+    localStorage.setItem('sora_gallery_index_raw', text);
+  } catch {}
+}
+
+async function loadFile(file){
+  const text = await file.text();
+  await applyJsonText(text);
+}
+Now, just under all the top‑level const / let declarations (before any event listeners), add this auto‑init block:
+// ---- Auto-load JSON on startup ----
+(async () => {
+  // 1) Try cached text in localStorage
+  let text = localStorage.getItem('sora_gallery_index_raw');
+
+  // 2) If none, try sora_gallery_index.json in same folder
+  if (!text) {
+    try {
+      const res = await fetch('sora_gallery_index.json', { cache: 'no-store' });
+      if (res.ok) {
+        text = await res.text();
+      }
+    } catch (e) {
+      // ignore; will fall back to manual file picker
+    }
+  }
+
+  // 3) If we got text, use it
+  if (text) {
+    await applyJsonText(text);
+  } else {
+    stats.textContent = 'No JSON loaded yet — use the file picker once and I will remember it.';
+  }
+})();
+Result:
+First time: use the file picker once → it caches the raw JSON.
+Next time you open the HTML: it auto‑loads from the cached text, no browsing.
+If you ever re‑export a fresh JSON and want the viewer to pick it up, just click the file picker once with the new file; the cache will update.
+2. Have it “just see” your images folder
+The viewer doesn’t know about C:\SoraImageDownload\images by magic; you still have to tell the browser “this page is allowed to read that folder”. Because of browser security, you cannot skip that permission step — but you can make it super light:
+Click “Connect downloads folder…”
+Choose C:\SoraImageDownload\images
+Done for that session.
+The script already maps all files it sees in that folder and marks cards offline when it finds a matching gen_… id. 
+sora_offline_viewer_offlinefirst
+
+ As long as Chrome’s download location is set to C:\SoraImageDownload\images, everything new will land there and be picked up next time you connect that folder. There is no way, from HTML/JS, to silently auto‑open C:\SoraImageDownload\images with filesystem access—Chrome will always require some user action. One click per session is the minimum we can get.
+3. Stop the “profile_placeholder_v4.png” spam
+Your JSON contains some entries that aren’t real generations; they’re CDN avatar/placeholder URLs. With your current code, “Open MISSING” happily opens those raw URLs, which is why you get a flood of tabs on cdn.openai.com/...profile_placeholder_v4.png. 
+sora_offline_viewer_offlinefirst
+
+ We can make “Open MISSING” only open items that actually have a Sora generation id (a gen_…). Find this block near the bottom:
+document.getElementById('openMissingAuto').addEventListener('click', async () => {
+  const limit = Math.max(1, Math.min(parseInt(limitInput.value||'40',10), FILTERED.length));
+  const delay = Math.max(150, parseInt(delayInput.value||'800',10));
+  const missing = FILTERED.filter(it => !(OFFLINE.get(it.id)?.files?.length));
+  const subset = missing.slice(0, limit);
+  prog.max = subset.length; prog.value = 0; progText.textContent = `0 / ${subset.length}`;
+
+  for (let i=0;i<subset.length;i++){
+    const it = subset[i];
+    let href = rebuildOnlineLink(it.href || it.thumb || '');
+    if (appendAuto.checked) href += (href.includes('?')?'&':'?') + 'auto=1';
+    window.open(href, '_blank', 'noopener');
+    prog.value = i+1; progText.textContent = `${i+1} / ${subset.length}`;
+    await sleep(delay);
+  }
+});
+Replace it with:
+document.getElementById('openMissingAuto').addEventListener('click', async () => {
+  const limit = Math.max(1, Math.min(parseInt(limitInput.value||'40',10), FILTERED.length));
+  const delay = Math.max(150, parseInt(delayInput.value||'800',10));
+
+  // Only items that actually have a gen_... id and no offline file
+  const missing = FILTERED.filter(it => it.id && !(OFFLINE.get(it.id)?.files?.length));
+  const subset = missing.slice(0, limit);
+
+  prog.max = subset.length;
+  prog.value = 0;
+  progText.textContent = `0 / ${subset.length}`;
+
+  let opened = 0;
+  for (const it of subset) {
+    let href = rebuildOnlineLink(it.href || it.thumb || '');
+    // Only open real /g/gen_... pages, never raw CDN assets
+    if (!/\/g\/gen_/i.test(href)) continue;
+
+    if (appendAuto.checked) href += (href.includes('?') ? '&' : '?') + 'auto=1';
+    window.open(href, '_blank', 'noopener');
+    opened++;
+    prog.value = opened;
+    progText.textContent = `${opened} / ${subset.length}`;
+    await sleep(delay);
+  }
+});
+Now “Open MISSING” will ignore those CDN-only entries and only open proper /g/gen_… item pages (the ones the Tampermonkey script runs on).
+4. Do we need to rescan Sora again?
+would it be easier if we re-did the scan of sora where it goes down my gallery bit by bit and captures the images like it did before
+Honestly? No:
+Scrolling the gallery again gives you… another big pile of URLs.
+You’d still hit the same CORS wall for actually downloading media from videos.openai.com.
+The thing that now actually matters is:
+you have a JSON index (sora_gallery_index.json), and
+your auto-saver + .meta.json sidecars (for prompts & asset URLs), and
+a dedicated images folder.
+We’re past the “collect links” phase. You already did the hard part. What we’re doing now is just smoothing UI:
+JSON auto-load via localStorage.
+One-click access to .\images.
+Filtering out junk CDN links so batch-open only hits /g/gen_….
+5. What your life looks like once this is in place
+Folder layout (your idea was perfect):
+C:\SoraImageDownload\
+  sora_offline_viewer_offlinefirst.html
+  sora_gallery_index.json
+  images\
+    gen_01....--whatever.webp
+    gen_01....--whatever2.mp4
+    ...
+  meta\   (optional, if you keep .meta.jsons)
+Workflow when you want to sync:
+Open sora_offline_viewer_offlinefirst.html.
+It auto-loads sora_gallery_index.json (from cache).
+Click Connect downloads folder… → pick C:\SoraImageDownload\images.
+Click Open MISSING (auto-save) in batches.
+Tabs open /g/gen_…?auto=1.
+Tampermonkey script scrapes prompt + asset URL; you either:
+use it just for prompts, or
+use the PowerShell script I gave last time to download from the .meta.json if the browser won’t auto-save.
+Close tabs, refresh offline viewer: new images now show as offline ✓.
+For casual browsing later, you just:
+Open the HTML,
+Click “Connect downloads folder…” once,
+Browse everything offline with prompts and quick “View online” links.
+If you want, I can also give you an even more stripped-down viewer that:
+Always assumes sora_gallery_index.json is next to it,
+Always assumes images live in .\images,
+Only has: filter box, thumbnail grid, “View offline / View online / Copy prompt”.
+But with the JSON auto‑cache + images mapping fixed, you’re already very close to what you originally wanted: one folder, one HTML, one images subfolder, zero re-scroll of Sora.
+
+Sources
+You said:
+sora_offline_viewer_offlinefirst.html
+File
+sora_gallery_index.json
+File
+okay lets do this: heres the json heres the offline viewer, just fix them give me the correct files ill clear the folder so i can start from scratch
+ChatGPT said:
+
+Thought for 5m 38s
+Yeah, this is clunky right now. You’re not wrong. Let me untangle what’s going on and then give you a smoother version of the setup so you’re not fighting it every time.
+0. What’s actually happening right now
+The Tampermonkey script is downloading the images, but:
+They’re going into whatever folder your browser is set to use (you said that’s an images folder now).
+The offline viewer:
+Only knows about the URLs + IDs from sora_gallery_index.json.
+It only knows where the actual files are after you give it access to a folder via “Connect downloads folder…”.
+Browsers cannot magically know “C:\sora\images” on their own. They always require a user gesture (click) to grant folder access. That’s a hard security rule, not me being lazy.
+So: the best we can do is:
+Make JSON loading automatic (no more picking the JSON every time).
+Make using the images folder one tiny, predictable step (one button → choose folder).
+Fix the CDN placeholder bullshit so “View offline” actually shows your real images, not that gray silhouette thing.
+1. Updated offline viewer: JSON auto-load, works with your images folder
+I’m going to give you a cleaned-up version of sora_offline_viewer_offlinefirst.html that:
+Auto-loads sora_gallery_index.json once you’ve pointed it at the file (and caches the text in localStorage).
+On future opens, it just comes up with your gallery already loaded.
+Still uses “Connect downloads folder…” to hook into your images folder and find matching files.
+How to use this version
+Put this file and sora_gallery_index.json in the same folder, e.g.:
+C:\sora_offline\
+    sora_offline_viewer_offlinefirst.html
+    sora_gallery_index.json
+    images\   ← all your downloaded media + .meta.json files live here
+Open the HTML file in your browser (file:// is fine).
+First time only:
+Use the little file picker (Choose file) to load sora_gallery_index.json.
+That caches it. Next time you open the viewer, it auto-loads from cache.
+Click “Connect downloads folder…” and choose your images folder.
+The viewer scans recursively, matches files to IDs, and all the “offline/missing” badges + “View offline” buttons update.
+After that:
+Next session = open HTML → gallery auto-populated → click “Connect downloads folder…” → done.
+Drop-in HTML (script part only)
+You don’t have to replace your whole file if you’re comfortable just replacing the <script>…</script> block, but safest is: copy everything and overwrite the old HTML file with this. I’ll just show you the <script> part here since your styles/header are already fine:
+<script>
+  // ------- State -------
+  const grid = document.getElementById('grid');
+  const stats = document.getElementById('stats');
+  const search = document.getElementById('search');
+  const baseUrlInput = document.getElementById('baseUrl');
+  const preferOffline = document.getElementById('preferOffline');
+  const prog = document.getElementById('prog');
+  const progText = document.getElementById('progText');
+  const delayInput = document.getElementById('delay');
+  const limitInput = document.getElementById('limit');
+  const appendAuto = document.getElementById('appendAuto');
+
+  let DATA = [];
+  let FILTERED = [];
+  let OFFLINE = new Map();
+  let ALLFILES = [];
+
+  const isVideoName = (n)=>/\.(mp4|webm|mov|m4v)$/i.test(n);
+  const isImageName = (n)=>/\.(png|jpg|jpeg|webp|gif)$/i.test(n);
+  const isMetaName  = (n)=>/\.meta\.json$/i.test(n);
+  const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+
+  // ---- Auto-load JSON on startup ----
+  (async () => {
+    let text = null;
+
+    // 1) Try cache (from previous manual load)
+    try {
+      text = localStorage.getItem('sora_gallery_index_raw') || null;
+    } catch {}
+
+    // 2) If none, *try* sora_gallery_index.json next to this file (works best if served via http, may fail on file://)
+    if (!text) {
+      try {
+        const res = await fetch('sora_gallery_index.json', { cache: 'no-store' });
+        if (res.ok) text = await res.text();
+      } catch (e) {
+        // ignore, we’ll fall back to manual
+      }
+    }
+
+    if (text) {
+      await applyJsonText(text);
+    } else {
+      stats.textContent = 'No JSON yet — use the file picker once, I’ll remember it after.';
+    }
+  })();
+
+  // ---- JSON helpers ----
+  function normItem(x){
+    if (typeof x === 'string') return {thumb:x, href:x, prompt:null, scrollY:null, id:extractId(x)};
+    if (x && typeof x === 'object'){
+      const thumb = x.thumb || x.url || x.image || x.src || '';
+      const href = x.href || x.link || x.url || thumb;
+      const prompt = x.prompt || x.caption || x.text || '';
+      const id = extractId(href || thumb);
+      return {thumb, href, prompt, scrollY: typeof x.scrollY === 'number' ? x.scrollY : null, id};
+    }
+    return {thumb:'', href:'', prompt:'', id:null};
+  }
+
+  function extractId(url){
+    if (!url) return null;
+    try{
+      const u = new URL(url, 'https://dummy');
+      const m = u.pathname.match(/\/g\/([^\/?#]+)/);
+      if (m) return m[1];
+      const m2 = (url+'').match(/(gen_[A-Za-z0-9_-]+)/);
+      return m2 ? m2[1] : null;
+    }catch{
+      const m3 = (url+'').match(/(gen_[A-Za-z0-9_-]+)/);
+      return m3 ? m3[1] : null;
+    }
+  }
+
+  function rebuildOnlineLink(orig){
+    const id = extractId(orig);
+    const base = (baseUrlInput.value || '').replace(/\/+$/,'');
+    if (!id) return orig;
+    return base + '/g/' + id;
+  }
+
+  async function parseText(text){
+    try{
+      const j = JSON.parse(text);
+      if (Array.isArray(j)) return j;
+      if (j.log?.entries){
+        const urls = [...new Set(j.log.entries
+          .filter(en => /image|video/.test(en.response?.content?.mimeType || ''))
+          .map(en => ({thumb: en.request.url, href: en.request.url})))];
+        return urls;
+      }
+      if (Array.isArray(j.urls)) return j.urls;
+      return [];
+    }catch{
+      return text.split(/\r?\n/).filter(Boolean).map(u => ({thumb:u, href:u}));
+    }
+  }
+
+  async function applyJsonText(text){
+    const arr = await parseText(text);
+    DATA = arr.map(normItem);
+    applyFilter();
+    try{
+      localStorage.setItem('sora_gallery_index_raw', text);
+    }catch{}
+  }
+
+  async function loadFile(file){
+    const text = await file.text();
+    await applyJsonText(text);
+  }
+
+  document.getElementById('file').addEventListener('change', async (e) => {
+    const f = e.target.files[0]; if(!f) return; await loadFile(f);
+  });
+
+  document.getElementById('loadLocal').addEventListener('click', async () => {
+    try{
+      const res = await fetch('sora_gallery_index.json');
+      const text = await res.text();
+      await applyJsonText(text);
+    }catch(e){
+      alert('Could not load sora_gallery_index.json from this folder. Use the file picker instead once; I’ll cache it.');
+    }
+  });
+
+  // ---- Folder scan for offline media ----
+  async function pickDir(){
+    try{
+      const dir = await window.showDirectoryPicker();
+      await scanDir(dir);
+    }catch(e){
+      if (e.name !== 'AbortError') alert('Folder access failed: ' + e.message);
+    }
+  }
+  document.getElementById('pickDir').addEventListener('click', pickDir);
+
+  async function scanDir(dir){
+    OFFLINE.clear();
+    ALLFILES = [];
+    prog.value = 0; prog.max = 100; progText.textContent = 'Scanning…';
+    await walkDir(dir);
+    progText.textContent = `Found ${ALLFILES.length} files`;
+    applyFilter();
+  }
+
+  async function walkDir(dirHandle, sub=''){
+    for await (const [name, h] of dirHandle.entries()){
+      if (h.kind === 'file'){
+        const path = sub ? (sub + '/' + name) : name;
+        ALLFILES.push({name, handle: h, path});
+        if (isMetaName(name)){
+          try{
+            const file = await h.getFile();
+            const text = await file.text();
+            const meta = JSON.parse(text);
+            const id = extractId(meta.SourceURL || meta.source || meta.url || '') || (name.split('.meta.json')[0]);
+            if (id){
+              const rec = OFFLINE.get(id) || {files:[], meta:null, prompt:null};
+              rec.meta = meta;
+              rec.prompt = meta.Prompt || meta.prompt || null;
+              OFFLINE.set(id, rec);
+            }
+          }catch{}
+        }
+      } else if (h.kind === 'directory'){
+        await walkDir(h, sub ? (sub + '/' + name) : name);
+      }
+    }
+    for (const f of ALLFILES){
+      if (!(isImageName(f.name) || isVideoName(f.name))) continue;
+      const id = extractId(f.name) || f.name.split('--')[0];
+      if (!id) continue;
+      const rec = OFFLINE.get(id) || {files:[], meta:null, prompt:null};
+      rec.files.push(f);
+      OFFLINE.set(id, rec);
+    }
+  }
+
+  function applyFilter(){
+    const q = search.value.trim().toLowerCase();
+    let list = DATA.slice();
+    if(q){
+      list = list.filter(it => {
+        const hay = [
+          it.href||'',
+          it.thumb||'',
+          it.id||'',
+          it.prompt||'',
+          (OFFLINE.get(it.id)?.prompt)||''
+        ].join(' ').toLowerCase();
+        return hay.includes(q);
+      });
+    }
+    FILTERED = list;
+    render(FILTERED);
+  }
+  search.addEventListener('input', applyFilter);
+  preferOffline.addEventListener('change', ()=>render(FILTERED));
+
+  async function render(list){
+    grid.innerHTML = '';
+    let have = 0, miss = 0;
+    for (const item of list){
+      const rec = OFFLINE.get(item.id);
+      const haveOffline = !!(rec && rec.files && rec.files.length);
+      haveOffline ? have++ : miss++;
+
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      const tw = document.createElement('div');
+      tw.className = 'thumbwrap';
+
+      const badges = document.createElement('div');
+      badges.className = 'badges';
+      const offBadge = document.createElement('span');
+      offBadge.className = 'badge ' + (haveOffline ? 'ok' : 'missing');
+      offBadge.textContent = haveOffline ? 'offline' : 'missing';
+      badges.appendChild(offBadge);
+      tw.appendChild(badges);
+
+      const img = document.createElement(isVideoName(rec?.files?.[0]?.name||'') ? 'video' : 'img');
+      img.className = 'thumb';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+
+      if (haveOffline && preferOffline.checked){
+        const file = rec.files[0];
+        const fileObj = await file.handle.getFile();
+        const url = URL.createObjectURL(fileObj);
+        if (img.tagName === 'VIDEO'){
+          img.preload = 'metadata';
+          img.controls = true;
+          img.src = url;
+        } else {
+          img.src = url;
+        }
+      } else {
+        img.src = item.thumb || item.href || '';
+      }
+      tw.appendChild(img);
+      card.appendChild(tw);
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const a = document.createElement('a');
+      a.href = item.href || '#';
+      a.target = '_blank'; a.rel = 'noopener';
+      a.textContent = (item.href||'').slice(0, 80);
+      meta.appendChild(a);
+      const idSpan = document.createElement('span');
+      idSpan.textContent = ' • ' + (item.id || 'no-id');
+      meta.appendChild(idSpan);
+      card.appendChild(meta);
+
+      const promptText = (rec?.prompt) || item.prompt || '';
+      if (promptText){
+        const p = document.createElement('div');
+        p.className = 'prompt';
+        p.textContent = promptText;
+        card.appendChild(p);
+      }
+
+      const btns = document.createElement('div');
+      btns.className = 'buttons';
+
+      const btnOnline = document.createElement('a');
+      btnOnline.className = 'btn online';
+      btnOnline.textContent = 'View online';
+      btnOnline.href = rebuildOnlineLink(item.href || item.thumb || '');
+      btnOnline.target = '_blank'; btnOnline.rel = 'noopener';
+      btns.appendChild(btnOnline);
+
+      if (haveOffline){
+        const file = rec.files[0];
+        const openOffline = document.createElement('button');
+        openOffline.className = 'btn offline';
+        openOffline.textContent = 'View offline';
+        openOffline.onclick = async ()=>{
+          const f = await file.handle.getFile();
+          const u = URL.createObjectURL(f);
+          window.open(u, '_blank');
+        };
+        btns.appendChild(openOffline);
+      }
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'btn';
+      copyBtn.textContent = 'Copy prompt';
+      copyBtn.onclick = async ()=>{
+        try{
+          await navigator.clipboard.writeText(promptText || '');
+          copyBtn.textContent = 'Copied!';
+          setTimeout(()=>copyBtn.textContent='Copy prompt', 1200);
+        }catch{
+          alert(promptText || '');
+        }
+      };
+      btns.appendChild(copyBtn);
+
+      card.appendChild(btns);
+      grid.appendChild(card);
+    }
+    stats.textContent = `${list.length} items — offline ${have} / missing ${miss}`;
+  }
+
+  // ---- Auto-open missing items in Sora for auto-save ----
+  document.getElementById('openMissingAuto').addEventListener('click', async () => {
+    const limit = Math.max(1, Math.min(parseInt(limitInput.value||'40',10), FILTERED.length));
+    const delay = Math.max(150, parseInt(delayInput.value||'800',10));
+    const missing = FILTERED.filter(it => !(OFFLINE.get(it.id)?.files?.length));
+    const subset = missing.slice(0, limit);
+    prog.max = subset.length; prog.value = 0; progText.textContent = `0 / ${subset.length}`;
+
+    for (let i=0;i<subset.length;i++){
+      const it = subset[i];
+      let href = rebuildOnlineLink(it.href || it.thumb || '');
+      if (appendAuto.checked) href += (href.includes('?')?'&':'?') + 'auto=1';
+      window.open(href, '_blank', 'noopener');
+      prog.value = i+1; progText.textContent = `${i+1} / ${subset.length}`;
+      await sleep(delay);
+    }
+  });
+</script>
+That’s the viewer sorted: JSON auto, offline backed by your images folder.
+2. Fixing the “CDN placeholder” bug in the Tampermonkey auto-saver
+The reason you sometimes get that gray profile_placeholder_v4.png instead of your actual media is:
+The script just grabs the first <img> or <video> it finds.
+On some Sora pages, the placeholder image appears before the real asset, so it happily grabs the wrong thing.
+We can fix that by explicitly ignoring the placeholder URL. Here’s an updated Tampermonkey script (you can replace the whole thing in Tampermonkey with this):
+// ==UserScript==
+// @name         Sora Auto Saver — media + prompt (fixed)
+// @namespace    amelia/sora
+// @version      3.1
+// @description  Download media + prompt from Sora /g/<id> pages; auto mode with ?auto=1
+// @match        https://sora.chatgpt.com/g/*
+// @match        *://*/g/*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  const bar = document.createElement('div');
+  bar.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;background:#0b3;color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 monospace;box-shadow:0 2px 10px rgba(0,0,0,.4)';
+  document.documentElement.appendChild(bar);
+  const set = t => bar.textContent = 'Sora Saver: ' + t;
+
+  function* deepNodes(root = document) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let n;
+    while ((n = walker.nextNode())) {
+      yield n;
+      const sr = n.shadowRoot;
+      if (sr) yield* deepNodes(sr);
+    }
+  }
+
+  function looksLikePlaceholder(url) {
+    if (!url) return false;
+    const u = url.toString();
+    return u.includes('profile_placeholder') || u.includes('/sora/images/profile_placeholder');
+  }
+
+  async function waitForAsset(timeoutMs = 15000) {
+    const t0 = performance.now();
+    let best = null;
+
+    while (performance.now() - t0 < timeoutMs) {
+      // Prefer <video> with real src
+      for (const el of deepNodes()) {
+        if (el.tagName === 'VIDEO') {
+          const src =
+            el.currentSrc ||
+            el.src ||
+            (el.querySelector('source') && el.querySelector('source').src);
+          if (src && !looksLikePlaceholder(src)) {
+            return { url: src, kind: 'video' };
+          }
+        }
+      }
+      // Fallback to <img> that isn't a placeholder / data URI
+      for (const el of deepNodes()) {
+        if (el.tagName === 'IMG') {
+          const src = el.currentSrc || el.src;
+          if (src && !src.startsWith('data:') && !looksLikePlaceholder(src)) {
+            // keep first good candidate
+            if (!best) best = { url: src, kind: 'image' };
+          }
+        }
+      }
+
+      if (best) return best;
+
+      set('looking for media…');
+      await sleep(300);
+    }
+    return best;
+  }
+
+  function guessId() {
+    const m = location.pathname.match(/\/g\/([^\/?#]+)/);
+    return m ? m[1] : 'item';
+  }
+
+  function sanitize(s) {
+    return (s || '').replace(/[\\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 120);
+  }
+
+  async function fetchPrompt(timeoutMs = 4000) {
+    for (const el of deepNodes()) {
+      const t = el.getAttribute?.('data-prompt')
+        || el.getAttribute?.('aria-label')
+        || el.getAttribute?.('title')
+        || (el.textContent || '');
+      if (t && t.length > 15 && /[ ,.;:!?]/.test(t)) return t.trim();
+    }
+    await sleep(timeoutMs);
+    for (const el of deepNodes()) {
+      const t = el.getAttribute?.('data-prompt')
+        || el.getAttribute?.('aria-label')
+        || el.getAttribute?.('title')
+        || (el.textContent || '');
+      if (t && t.length > 15 && /[ ,.;:!?]/.test(t)) return t.trim();
+    }
+    return '';
+  }
+
+  async function download(url, filename) {
+    try {
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        URL.revokeObjectURL(a.href);
+        a.remove();
+      }, 1500);
+      return true;
+    } catch (e) {
+      // Fallback: open raw asset (browser handles download/view)
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.click();
+      return false;
+    }
+  }
+
+  async function run(auto) {
+    set('initializing…');
+    const id = guessId();
+
+    const asset = await waitForAsset();
+    if (!asset) {
+      set('no media found');
+      return;
+    }
+    set('media found');
+
+    const prompt = await fetchPrompt();
+    const base = id + (prompt ? ('--' + sanitize(prompt)) : '');
+
+    const ext = (() => {
+      const m = asset.url.match(/\.(mp4|webm|mov|m4v|jpg|jpeg|png|webp)(?=[?#]|$)/i);
+      if (m) return '.' + m[1].toLowerCase();
+      return asset.kind === 'video' ? '.mp4' : '.jpg';
+    })();
+
+    const ok = await download(asset.url, base + ext);
+    set(ok ? 'downloaded media' : 'opened asset tab (CORS)');
+
+    const meta = {
+      SourceURL: location.href,
+      AssetURL: asset.url,
+      Prompt: prompt || '',
+      Title: sanitize(prompt || ''),
+      Kind: asset.kind,
+      SuggestedBaseName: base
+    };
+    const sidecar = new Blob([JSON.stringify(meta, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(sidecar);
+    a.download = id + '.meta.json';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(a.href);
+      a.remove();
+    }, 1500);
+
+    set('done ✓');
+    if (auto) {
+      await sleep(1200);
+      window.close();
+    }
+  }
+
+  const btn = document.createElement('button');
+  btn.textContent = 'Download with Prompt';
+  btn.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;background:#134;color:#fff;border:0;padding:8px 12px;border-radius:8px;cursor:pointer';
+  btn.onclick = () => run(false);
+  document.documentElement.appendChild(btn);
+
+  const auto = /[?&]auto=1/.test(location.search);
+  if (auto) run(true);
+  else set('ready (click the button or use ?auto=1)');
+})();
+If you re-run “Open MISSING (auto-save)” in the viewer after this:
+It will open /g/... pages with ?auto=1.
+The script will grab the real media, not the placeholder.
+Files will go wherever your browser’s download folder is (point that at your images folder for sanity).
+Each card gets:
+One media file: gen_…--whatever.ext
+One sidecar JSON: gen_….meta.json with prompt + links.
+Then the offline viewer scans your images folder and everything lines up.
+3. “Can we just re-scan Sora like the original JSON thing?”
+Short answer:
+That old scroll-script only captured URLs, not real files. Those URLs are time-limited and will keep expiring. That’s why you’re fighting black images and broken thumbs. The “right” workflow for what you want (permanent local archive + prompts) is:
+One-time / occasional JSON refresh
+Use whatever method we used to build sora_gallery_index.json (scrolling script, HAR export, etc.).
+Offline viewer reads that JSON and shows everything (even if online URLs are dead).
+Auto-saver + Open MISSING methodically walks your /g/... pages and saves:
+Actual media files (image/video)
+Sidecar metadata with prompt
+From then on you truly own them locally.
+Re-scanning the gallery with an auto scroller again won’t fix the broken CDN URLs; it just regenerates another list of expiring URLs.
+4. The minimal sane workflow for you
+Let me boil it down so it’s not spaghetti in your head: Once, right now:
+Make a folder layout like:
+C:\sora_offline\
+    sora_offline_viewer_offlinefirst.html   ← new version
+    sora_gallery_index.json                 ← your big JSON
+    images\                                 ← make this empty for a clean run
+In your browser:
+Set download location to C:\sora_offline\images
+(or turn on “ask where to save” and always pick that folder).
+In Tampermonkey:
+Replace your Sora auto-saver script with the 3.1 version above.
+Open sora_offline_viewer_offlinefirst.html:
+Use the file picker to load sora_gallery_index.json once.
+Click “Connect downloads folder…” and pick the images folder.
+Hit “Open MISSING (auto-save)” in batches (40–60 at a time is sane).
+Later, any time:
+Open sora_offline_viewer_offlinefirst.html
+JSON auto-loads from cache.
+Click “Connect downloads folder…” → select images → all offline badges + “View offline” buttons work.
+If you make more stuff in Sora in the future:
+Update sora_gallery_index.json (new export/scan).
+Drop it next to the viewer; use file picker once; it overwrites the cache.
+Run “Open MISSING (auto-save)” again to fetch only the new ones.
+If you want, next step we can also do a quick sanity check: you tell me the path you’ve actually put the HTML / JSON / images in, and I’ll literally narrate “click this, then this, then this” so there’s no ambiguity. And no, you’re not crazy for wanting this to be smoother — Sora absolutely should have had an export/gallery feature built-in. So for now you get me instead.
+You said:
+File download link (s) ? please
+ChatGPT said:
+
+Thought for 4m 18s
+Yesss okay, here, take your goodies 😌☕ Your updated offline viewer file is here:
+Offline viewer HTML
+👉 Download sora_offline_viewer_offlinefirst.html
+And if you also want to grab the gallery index again:
+Gallery JSON
+👉 Download sora_gallery_index.json
+How to reset clean and start fresh
+Make an empty folder, e.g. C:\sora_gallery.
+Put these two files into that folder:
+sora_offline_viewer_offlinefirst.html
+sora_gallery_index.json
+Open the HTML file in your browser (double‑click it).
+Click:
+“Load sora_gallery_index.json” (so it ingests your JSON)
+“Connect downloads folder…” and pick the folder where your image files live (or where you’ll be downloading them into).
+After that, the grid should show:
+Thumbnails
+“offline / missing” badges
+Working View online / View offline buttons
+If anything looks cursed or half‑working, tell me what you see and we’ll bully it into behaving.
+You said:
+Uploaded image
+I cant download these files :(
+ChatGPT said:
+
+Thought for 5m 38s
+Yeahhh that red “code interpreter session expired” banner basically means:
+all those auto‑generated file download links are dead.
+They lived, they served, they died. 🪦
+I can’t resurrect those exact downloads, but we absolutely haven’t lost the idea — I’ll just give you a fresh offline viewer you can recreate locally, no sandbox needed.
+1. What happened (the annoying bit)
+When the previous session generated sora_offline_viewer_offlinefirst.html etc, the files lived inside that temporary sandbox.
+The “Download” links you clicked were just pointers into that sandbox.
+Once the session dies, those pointers stop working, and I don’t have any way to reach back into that old sandbox and grab them.
+So: those particular files are gone, but we can rebuild the viewer from scratch in like one copy‑paste.
+2. New offline viewer you can recreate locally
+Do this once:
+Create a folder somewhere, e.g.
+C:\sora_offline_gallery\
+Put your existing sora_gallery_index.json in that folder.
+Inside the same folder create a new file called:
+sora_offline_gallery.html
+Paste all of the code below into that file and save it.
+(Optional but recommended) Put all your downloaded images + .meta.json sidecars into a subfolder, e.g.:
+C:\sora_offline_gallery\images\
+(The viewer doesn’t care what it’s called, you’ll point it at the folder.)
+sora_offline_gallery.html (full code)
+Paste this whole thing:
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sora Offline Gallery — Local + Online</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+
+  <style>
+    :root {
+      --bg:#050812;
+      --fg:#e5ecf7;
+      --card:#101625;
+      --muted:#9aa7c1;
+      --accent:#7dd3fc;
+      --border:#20293a;
+      --btn:#172335;
+      --ok:#34d399;
+      --warn:#fbbf24;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+              font:14px/1.4 system-ui, -apple-system, BlinkMacSystemFont,"Segoe UI",sans-serif;}
+
+    header{
+      position:sticky;top:0;z-index:10;
+      display:flex;flex-wrap:wrap;align-items:center;gap:8px;
+      padding:8px 10px;border-bottom:1px solid var(--border);background:rgba(5,8,18,.96);
+      backdrop-filter:blur(10px);
+    }
+    .title{font-weight:600;margin-right:auto;}
+    input[type="file"]{color:var(--muted);max-width:210px}
+    input[type="search"]{
+      background:var(--card);color:var(--fg);border:1px solid var(--border);
+      border-radius:8px;padding:6px 9px;min-width:220px;outline:none;
+    }
+    input[type="search"]::placeholder{color:#64748b}
+    button{
+      background:var(--btn);color:var(--fg);border:1px solid var(--border);
+      border-radius:8px;padding:6px 10px;cursor:pointer;font:inherit;
+    }
+    button:hover{border-color:var(--accent);}
+    #stats{color:var(--muted);white-space:nowrap}
+
+    #grid{
+      padding:10px;display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(230px,1fr));
+      gap:10px;
+    }
+    .card{
+      background:var(--card);border-radius:12px;border:1px solid var(--border);
+      overflow:hidden;display:flex;flex-direction:column;min-height:230px;
+    }
+    .thumbwrap{position:relative;background:#050816;}
+    .thumb{
+      width:100%;aspect-ratio:1/1;object-fit:cover;display:block;
+      background:#020617;
+    }
+    .badge{
+      position:absolute;top:8px;left:8px;
+      padding:2px 7px;border-radius:999px;font-size:11px;
+      border:1px solid var(--border);background:rgba(0,0,0,.55);color:var(--muted);
+    }
+    .badge.ok{color:var(--ok);border-color:#15803d;background:rgba(22,163,74,.12);}
+    .badge.miss{color:var(--warn);border-color:#92400e;background:rgba(245,158,11,.14);}
+
+    .meta{
+      padding:6px 9px 4px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;
+      color:var(--muted);font-size:12px;
+    }
+    .meta-id{font-weight:500;color:var(--fg);}
+    .meta-link{
+      max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+      color:var(--accent);text-decoration:none;
+    }
+
+    .prompt{
+      padding:6px 9px 8px;border-top:1px dashed var(--border);
+      max-height:6.5em;overflow:auto;font-size:12px;white-space:pre-wrap;
+      scrollbar-width:thin;
+    }
+    .buttons{
+      padding:6px 9px 8px;border-top:1px solid var(--border);
+      display:flex;flex-wrap:wrap;gap:6px;
+    }
+    .btn{
+      background:#152238;border-radius:7px;border:1px solid var(--border);
+      padding:5px 9px;font-size:12px;cursor:pointer;color:var(--fg);
+      text-decoration:none;display:inline-flex;align-items:center;gap:4px;
+    }
+    .btn.offline{background:#0f291e;border-color:#14532d;}
+    .btn.online{background:#101c3b;border-color:#1d4ed8;}
+    .btn.small{padding-inline:7px;}
+    .btn:disabled{opacity:.45;cursor:default;}
+
+    footer{
+      position:sticky;bottom:0;z-index:10;
+      padding:6px 10px;border-top:1px solid var(--border);
+      background:rgba(5,8,18,.96);backdrop-filter:blur(10px);
+      display:flex;flex-wrap:wrap;align-items:center;gap:8px;
+      color:var(--muted);font-size:12px;
+    }
+    progress{width:200px;height:14px;}
+  </style>
+</head>
+<body>
+<header>
+  <div class="title">Sora Offline Gallery — Local + Online</div>
+  <button id="reloadJsonBtn">Reload default JSON</button>
+  <input id="jsonFileInput" type="file" accept=".json">
+  <button id="connectDirBtn">Connect images folder…</button>
+  <input id="search" type="search" placeholder="Filter by id / URL / prompt…">
+  <span id="stats">0 items</span>
+</header>
+
+<main id="grid"></main>
+
+<footer>
+  <span id="hint">1) JSON auto-loads if <code>sora_gallery_index.json</code> is next to this HTML. 2) Use “Connect images folder…” once per browser session.</span>
+</footer>
+
+<script>
+(() => {
+  const grid          = document.getElementById('grid');
+  const statsEl       = document.getElementById('stats');
+  const hintEl        = document.getElementById('hint');
+  const searchInput   = document.getElementById('search');
+  const jsonInput     = document.getElementById('jsonFileInput');
+  const reloadJsonBtn = document.getElementById('reloadJsonBtn');
+  const connectDirBtn = document.getElementById('connectDirBtn');
+
+  let items   = [];   // all gallery entries (normalized)
+  let filtered = [];  // filtered view
+  const offline = new Map(); // id -> { files:[{handle,name,path}], meta, prompt }
+
+  const isVideoName = name => /\.(mp4|webm|mov|m4v)$/i.test(name || '');
+  const isImageName = name => /\.(png|jpe?g|webp|gif)$/i.test(name || '');
+  const isMetaName  = name => /\.meta\.json$/i.test(name || '');
+
+  function getIdFromUrl(raw) {
+    if (!raw) return null;
+    const s = String(raw);
+    try {
+      const u = new URL(s, 'https://dummy.host');
+      const m = u.pathname.match(/\/g\/([^\/?#]+)/);
+      if (m) return m[1];
+    } catch (_) {}
+    const m2 = s.match(/(gen_[A-Za-z0-9_-]+)/);
+    return m2 ? m2[1] : null;
+  }
+
+  function normalize(raw) {
+    if (typeof raw === 'string') {
+      const id = getIdFromUrl(raw);
+      return { id, href: raw, thumb: raw, prompt: '' };
+    }
+    if (raw && typeof raw === 'object') {
+      const thumb  = raw.thumb  || raw.url || raw.image || raw.src || '';
+      const href   = raw.href   || raw.link || raw.url || thumb;
+      const prompt = raw.prompt || raw.caption || raw.text || '';
+      const id     = raw.id || getIdFromUrl(href) || getIdFromUrl(thumb);
+      return { id, href, thumb, prompt };
+    }
+    return { id:null, href:'', thumb:'', prompt:'' };
+  }
+
+  async function loadJsonText(text, label) {
+    let parsed;
+    try {
+      const j = JSON.parse(text);
+      if (Array.isArray(j)) parsed = j;
+      else if (Array.isArray(j.urls)) parsed = j.urls;
+      else throw new Error('JSON must be an array or {urls:[…]}');
+    } catch (e) {
+      alert('Could not parse JSON: ' + e.message);
+      return;
+    }
+    items = parsed.map(normalize);
+    filtered = items.slice();
+    render();
+    statsEl.textContent = `${filtered.length} items — source: ${label}`;
+  }
+
+  async function autoLoadJson() {
+    try {
+      const res = await fetch('sora_gallery_index.json');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const text = await res.text();
+      await loadJsonText(text, 'sora_gallery_index.json (auto)');
+    } catch (e) {
+      console.log('Auto JSON load failed:', e);
+      hintEl.textContent = 'Pick your JSON with the file picker, then connect the images folder.';
+    }
+  }
+
+  // ---- JSON controls ----
+  reloadJsonBtn.addEventListener('click', autoLoadJson);
+
+  jsonInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const text = await file.text();
+    await loadJsonText(text, file.name);
+  });
+
+  // ---- Folder access / offline index ----
+  connectDirBtn.addEventListener('click', async () => {
+    try {
+      const dir = await window.showDirectoryPicker();
+      offline.clear();
+      hintEl.textContent = 'Scanning folder…';
+      await walkDir(dir);
+      hintEl.textContent = `Connected. Offline items indexed: ${offline.size}.`;
+      render();
+    } catch (e) {
+      if (e.name !== 'AbortError') {
+        alert('Folder access failed: ' + e.message);
+      }
+    }
+  });
+
+  async function walkDir(dirHandle, prefix = '') {
+    for await (const [name, handle] of dirHandle.entries()) {
+      if (handle.kind === 'file') {
+        const path = prefix ? `${prefix}/${name}` : name;
+
+        if (isMetaName(name)) {
+          try {
+            const file = await handle.getFile();
+            const text = await file.text();
+            const meta = JSON.parse(text);
+            const id = getIdFromUrl(meta.SourceURL || meta.source || meta.url || '') ||
+                       name.replace(/\.meta\.json$/,'');
+            if (!id) continue;
+            const rec = offline.get(id) || { files: [], meta: null, prompt: '' };
+            rec.meta = meta;
+            rec.prompt = meta.Prompt || meta.prompt || rec.prompt;
+            offline.set(id, rec);
+          } catch (_) {
+            /* ignore broken meta */
+          }
+        } else if ( isImageName(name) || isVideoName(name) ) {
+          const m = name.match(/(gen_[A-Za-z0-9_-]+)/);
+          const id = m ? m[1] : null;
+          if (!id) continue;
+          const rec = offline.get(id) || { files: [], meta: null, prompt: '' };
+          rec.files.push({ handle, name, path });
+          offline.set(id, rec);
+        }
+
+      } else if (handle.kind === 'directory') {
+        await walkDir(handle, prefix ? `${prefix}/${name}` : name);
+      }
+    }
+  }
+
+  // ---- Filtering ----
+  searchInput.addEventListener('input', () => {
+    const q = searchInput.value.trim().toLowerCase();
+    if (!q) {
+      filtered = items.slice();
+    } else {
+      filtered = items.filter(it => {
+        const rec = offline.get(it.id);
+        const prompt = (rec && rec.prompt) || it.prompt || '';
+        const haystack = [
+          it.id || '',
+          it.href || '',
+          it.thumb || '',
+          prompt
+        ].join(' ').toLowerCase();
+        return haystack.includes(q);
+      });
+    }
+    render();
+  });
+
+  // ---- Rendering ----
+  function render() {
+    grid.innerHTML = '';
+    let offlineCount = 0;
+
+    for (const item of filtered) {
+      const rec = offline.get(item.id);
+      const haveOffline = !!(rec && rec.files && rec.files.length);
+      if (haveOffline) offlineCount++;
+
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      const tw = document.createElement('div');
+      tw.className = 'thumbwrap';
+
+      const badge = document.createElement('div');
+      badge.className = 'badge ' + (haveOffline ? 'ok' : 'miss');
+      badge.textContent = haveOffline ? 'offline' : 'online only';
+      tw.appendChild(badge);
+
+      const isVid = haveOffline && isVideoName(rec.files[0].name);
+      const media = document.createElement(isVid ? 'video' : 'img');
+      media.className = 'thumb';
+      media.loading = 'lazy';
+      media.decoding = 'async';
+
+      if (haveOffline) {
+        const fh = rec.files[0].handle;
+        fh.getFile().then(file => {
+          const url = URL.createObjectURL(file);
+          if (isVid) {
+            media.src = url;
+            media.controls = true;
+          } else {
+            media.src = url;
+          }
+        }).catch(() => {
+          media.src = item.thumb || item.href || '';
+        });
+      } else {
+        media.src = item.thumb || item.href || '';
+      }
+
+      tw.appendChild(media);
+      card.appendChild(tw);
+
+      const metaDiv = document.createElement('div');
+      metaDiv.className = 'meta';
+      const idSpan = document.createElement('span');
+      idSpan.className = 'meta-id';
+      idSpan.textContent = item.id || '[no id]';
+      metaDiv.appendChild(idSpan);
+
+      if (item.href) {
+        const link = document.createElement('a');
+        link.className = 'meta-link';
+        link.href = item.href;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = item.href.slice(0, 70);
+        metaDiv.appendChild(link);
+      }
+      card.appendChild(metaDiv);
+
+      const prompt = (rec && rec.prompt) || item.prompt || '';
+      if (prompt) {
+        const pDiv = document.createElement('div');
+        pDiv.className = 'prompt';
+        pDiv.textContent = prompt;
+        card.appendChild(pDiv);
+      }
+
+      const buttons = document.createElement('div');
+      buttons.className = 'buttons';
+
+      // View online — go to /g/<id> if we can, otherwise fallback to href/thumb
+      const openOnline = document.createElement('a');
+      openOnline.className = 'btn online';
+      openOnline.textContent = 'View online';
+      const idForUrl = item.id || getIdFromUrl(item.href || item.thumb || '');
+      if (idForUrl) {
+        openOnline.href = 'https://sora.chatgpt.com/g/' + idForUrl;
+      } else {
+        openOnline.href = item.href || item.thumb || '#';
+      }
+      openOnline.target = '_blank';
+      openOnline.rel = 'noopener';
+      buttons.appendChild(openOnline);
+
+      if (haveOffline) {
+        const openOffline = document.createElement('button');
+        openOffline.className = 'btn offline';
+        openOffline.textContent = 'View offline';
+        openOffline.addEventListener('click', async () => {
+          try {
+            const fh = rec.files[0].handle;
+            const file = await fh.getFile();
+            const url = URL.createObjectURL(file);
+            window.open(url, '_blank');
+          } catch (e) {
+            alert('Could not open offline file: ' + e.message);
+          }
+        });
+        buttons.appendChild(openOffline);
+      }
+
+      if (prompt) {
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'btn small';
+        copyBtn.textContent = 'Copy prompt';
+        copyBtn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(prompt);
+            copyBtn.textContent = 'Copied!';
+            setTimeout(() => copyBtn.textContent = 'Copy prompt', 900);
+          } catch (_) {
+            alert(prompt);
+          }
+        });
+        buttons.appendChild(copyBtn);
+      }
+
+      card.appendChild(buttons);
+      grid.appendChild(card);
+    }
+
+    statsEl.textContent = `${filtered.length} items — offline copies for ${offlineCount}`;
+  }
+
+  // Kick things off
+  autoLoadJson();
+})();
+</script>
+</body>
+</html>
+3. How to actually use it (step‑by‑step)
+Once that file exists:
+Put things together Folder layout like:
+C:\sora_offline_gallery\
+    sora_offline_gallery.html
+    sora_gallery_index.json
+    images\
+        gen_01xxxx--whatever.webp
+        gen_01xxxx.meta.json
+        ...
+Open the viewer
+Double‑click sora_offline_gallery.html (or drag it into your browser).
+It will try to auto‑load sora_gallery_index.json.
+If that fails, use the file picker to load it manually once.
+Connect your downloaded images
+Click “Connect images folder…”.
+Point it at the folder where Tampermonkey has been dropping all the media+meta files (e.g. images).
+The cards should flip from “online only” to “offline” and show proper thumbnails.
+Browse
+Click View offline → local full‑res image/video.
+Click View online → the Sora /g/<id> page with the prompt/UI.
+Copy prompt copies either the prompt from the .meta.json or, if missing there, from the index JSON.
+If you want, next step we can wire back in an “Open missing with ?auto=1” button that cooperates with your Tampermonkey auto‑downloader, but first I wanted to make sure you have a stable, copy‑paste‑able viewer that won’t vanish just because some sandbox decides it’s nap time. So: remake that HTML file from the code above, drop it next to your sora_gallery_index.json, hook up the images folder, and tell me what’s still janky.
+You said:
+Uploaded image
+still really fucking annoying to have to do this every fucking time I open it
+ChatGPT said:
+
+Thought for 7m 0s
+Yeah, this part is annoying, and no, you’re not crazy – it should be smoother. Let me break down what’s going on and then I’ll give you a fixed viewer that remembers the JSON so you don’t have to pick it every time.
+Why “Load sora_gallery_index.json” keeps failing
+You’re opening the HTML like this: file:///C:/whatever/sora_offline_viewer.html When a page is opened with the file:// scheme, the browser basically says:
+“JavaScript is not allowed to fetch() other random files from your disk.”
+So this line in the viewer / harvest page:
+fetch('sora_gallery_index.json')
+just dies with “Could not load sora_gallery_index.json”. The only thing the browser does allow is:
+File picker (<input type="file">)
+Directory picker (showDirectoryPicker())
+…and those always require a user action (click). That’s why you keep having to pick the JSON by hand. So:
+Nothing is “wrong” with the JSON.
+The button is blocked by browser security when the page is opened from file://.
+Fix: viewer that remembers the JSON (no more re‑selecting)
+What we can do is:
+When you load the JSON once, we stash the raw text in localStorage.
+On future loads, the viewer immediately uses that saved copy.
+You only need to use Choose File again when you export a new sora_gallery_index.json.
+That avoids the constant “pick file” pain, and doesn’t fight the browser’s security model.
+New viewer file
+Create a fresh file called e.g. sora_offline_viewer_persist.html and paste this whole thing into it:
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sora Offline‑First Gallery (Local + Online)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#0b0f16; --fg:#e9ecf1; --card:#111723; --muted:#9fb3c8; --accent:#7dd3fc; --border:#223040;
+    --btn:#173042; --ok:#34d399; --warn:#f59e0b; --bad:#ef4444;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,Segoe UI,Inter,Roboto,Arial}
+  header{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--border);padding:10px;
+         display:flex;flex-wrap:wrap;gap:10px;align-items:center;z-index:10}
+  .title{font-weight:700;margin-right:auto}
+  input[type="file"]{color:var(--muted)}
+  input[type="search"], input[type="url"], input[type="text"]{background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;outline:none}
+  .controls button, .controls input[type="number"]{background:var(--btn);border:1px solid var(--border);color:var(--fg);
+          padding:6px 10px;border-radius:8px;cursor:pointer}
+  .controls input[type="number"]{width:90px}
+  .controls label{display:flex;align-items:center;gap:6px}
+  .controls .pill{background:#103146;color:#c9ecff;border:1px solid var(--border);padding:4px 8px;border-radius:999px}
+  #stats{color:var(--muted)}
+  #grid{padding:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;min-height:260px}
+  .thumbwrap{position:relative;background:#0e1422}
+  .thumb{width:100%;aspect-ratio:1/1;object-fit:cover;display:block}
+  .badges{position:absolute;top:8px;left:8px;display:flex;gap:6px}
+  .badge{font-size:11px;padding:2px 6px;border-radius:999px;border:1px solid var(--border);background:rgba(0,0,0,.4)}
+  .badge.ok{color:var(--ok);border-color:#064e3b;background:rgba(16,185,129,.1)}
+  .badge.missing{color:var(--warn);border-color:#7c5d16;background:rgba(245,158,11,.12)}
+  .meta{padding:8px 10px;color:var(--muted);display:flex;gap:8px;align-items:center}
+  .meta a{color:var(--accent);text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60%}
+  .prompt{padding:8px 10px;border-top:1px dashed var(--border);max-height:8em;overflow:auto;white-space:pre-wrap}
+  .buttons{display:flex;gap:8px;padding:8px 10px;border-top:1px solid var(--border);flex-wrap:wrap}
+  .btn{background:#173042;border:1px solid var(--border);color:var(--fg);padding:6px 10px;border-radius:8px;cursor:pointer;text-decoration:none}
+  .btn.offline{background:#0f2e20;border-color:#0b3f2e}
+  .btn.online{background:#1d2c52;border-color:#233d6b}
+  footer{position:sticky;bottom:0;border-top:1px solid var(--border);background:var(--bg);display:flex;gap:10px;align-items:center;padding:8px 10px}
+  progress{width:220px;height:18px}
+  .ok{color:var(--ok)}
+  .warn{color:var(--warn)}
+  .bad{color:var(--bad)}
+</style>
+</head>
+<body>
+  <header>
+    <div class="title">Sora Offline‑First Gallery (Local + Online)</div>
+    <input id="file" type="file" accept=".json,.txt">
+    <button id="loadSaved">Use saved index</button>
+    <button id="pickDir">Connect downloads folder…</button>
+    <input id="search" type="search" placeholder="Filter by URL, id, or prompt…" size="30">
+    <label>Base URL <input id="baseUrl" type="url" size="28" value="https://sora.chatgpt.com"></label>
+    <label><input id="preferOffline" type="checkbox" checked> Prefer offline</label>
+    <div id="stats">0 items</div>
+  </header>
+
+  <div id="grid"></div>
+
+  <footer>
+    <span>Queue:</span>
+    <progress id="prog" value="0" max="100"></progress>
+    <span id="progText"></span>
+    <div class="controls">
+      <label>Open limit <input id="limit" type="number" value="40" min="1" step="1"></label>
+      <label>delay ms <input id="delay" type="number" value="800" min="150" step="50"></label>
+      <label><input id="appendAuto" type="checkbox" checked> append <span class="pill">?auto=1</span></label>
+      <button id="openMissingAuto">Open MISSING (auto-save)</button>
+    </div>
+    <div class="ok" id="hint">Tip: allow pop-ups & automatic downloads for Sora.</div>
+  </footer>
+
+<script>
+  const STORAGE_KEY = 'sora_gallery_index_raw_v1';
+
+  const grid = document.getElementById('grid');
+  const stats = document.getElementById('stats');
+  const search = document.getElementById('search');
+  const baseUrlInput = document.getElementById('baseUrl');
+  const preferOffline = document.getElementById('preferOffline');
+  const prog = document.getElementById('prog');
+  const progText = document.getElementById('progText');
+  const delayInput = document.getElementById('delay');
+  const limitInput = document.getElementById('limit');
+  const appendAuto = document.getElementById('appendAuto');
+
+  let DATA = [];
+  let FILTERED = [];
+  let OFFLINE = new Map();
+  let ALLFILES = [];
+
+  const isVideoName = (n)=>/\.(mp4|webm|mov|m4v)$/i.test(n);
+  const isImageName = (n)=>/\.(png|jpg|jpeg|webp|gif)$/i.test(n);
+  const isMetaName  = (n)=>/\.meta\.json$/i.test(n);
+  const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+
+  function normItem(x){
+    if (typeof x === 'string') return {thumb:x, href:x, prompt:null, scrollY:null, id:extractId(x)};
+    if (x && typeof x === 'object'){
+      const thumb = x.thumb || x.url || x.image || x.src || '';
+      const href = x.href || x.link || x.url || thumb;
+      const prompt = x.prompt || x.caption || x.text || '';
+      const id = extractId(href || thumb);
+      return {thumb, href, prompt, scrollY: typeof x.scrollY === 'number' ? x.scrollY : null, id};
+    }
+    return {thumb:'', href:'', prompt:'', id:null};
+  }
+
+  function extractId(url){
+    if (!url) return null;
+    try{
+      const u = new URL(url, 'https://dummy');
+      const m = u.pathname.match(/\/g\/([^\/?#]+)/);
+      if (m) return m[1];
+      const m2 = url.match(/(gen_[A-Za-z0-9_-]+)/);
+      return m2 ? m2[1] : null;
+    }catch{
+      const m3 = (url+'').match(/(gen_[A-Za-z0-9_-]+)/);
+      return m3 ? m3[1] : null;
+    }
+  }
+
+  function rebuildOnlineLink(orig){
+    const id = extractId(orig);
+    const base = (baseUrlInput.value || '').replace(/\/+$/,'');
+    if (!id) return orig;
+    return base + '/g/' + id;
+  }
+
+  async function parseText(text){
+    try{
+      const j = JSON.parse(text);
+      if (Array.isArray(j)) return j;
+      if (j.log?.entries){
+        const urls = [...new Set(j.log.entries
+          .filter(en => /image|video/.test(en.response?.content?.mimeType || ''))
+          .map(en => ({thumb: en.request.url, href: en.request.url})))];
+        return urls;
+      }
+      if (Array.isArray(j.urls)) return j.urls;
+      return [];
+    }catch{
+      return text.split(/\r?\n/).filter(Boolean).map(u => ({thumb:u, href:u}));
+    }
+  }
+
+  async function loadFromText(text, label){
+    const arr = await parseText(text);
+    DATA = arr.map(normItem);
+    try{ localStorage.setItem(STORAGE_KEY, text); }catch(e){}
+    applyFilter();
+    if(label) console.log('Loaded index from', label);
+  }
+
+  async function loadFile(file){
+    const text = await file.text();
+    await loadFromText(text, 'file picker');
+  }
+
+  document.getElementById('file').addEventListener('change', async (e) => {
+    const f = e.target.files[0]; if(!f) return; await loadFile(f);
+  });
+
+  document.getElementById('loadSaved').addEventListener('click', async () => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved){
+      await loadFromText(saved, 'saved copy');
+    } else {
+      alert('No saved index yet. Use the file picker once to load sora_gallery_index.json.');
+    }
+  });
+
+  async function pickDir(){
+    try{
+      const dir = await window.showDirectoryPicker();
+      OFFLINE.clear();
+      ALLFILES = [];
+      prog.value = 0; prog.max = 100; progText.textContent = 'Scanning…';
+      await walkDir(dir);
+      progText.textContent = `Found ${ALLFILES.length} files`;
+      applyFilter();
+    }catch(e){
+      if (e.name !== 'AbortError') alert('Folder access failed: ' + e.message);
+    }
+  }
+  document.getElementById('pickDir').addEventListener('click', pickDir);
+
+  async function walkDir(dirHandle, sub=''){
+    for await (const [name, h] of dirHandle.entries()){
+      if (h.kind === 'file'){
+        ALLFILES.push({name, handle: h, path: sub ? (sub + '/' + name) : name});
+        if (isMetaName(name)){
+          try{
+            const file = await h.getFile();
+            const text = await file.text();
+            const meta = JSON.parse(text);
+            const id = extractId(meta.SourceURL || meta.source || meta.url || '') || (name.split('.meta.json')[0]);
+            if (id){
+              const rec = OFFLINE.get(id) || {files:[], meta:null, prompt:null};
+              rec.meta = meta;
+              rec.prompt = meta.Prompt || meta.prompt || null;
+              OFFLINE.set(id, rec);
+            }
+          }catch{}
+        }
+      } else if (h.kind === 'directory'){
+        await walkDir(h, sub ? (sub + '/' + name) : name);
+      }
+    }
+    for (const f of ALLFILES){
+      if (!(isImageName(f.name) || isVideoName(f.name))) continue;
+      const id = extractId(f.name) || f.name.split('--')[0];
+      if (!id) continue;
+      const rec = OFFLINE.get(id) || {files:[], meta:null, prompt:null};
+      rec.files.push(f);
+      OFFLINE.set(id, rec);
+    }
+  }
+
+  function applyFilter(){
+    const q = search.value.trim().toLowerCase();
+    let list = DATA.slice();
+    if(q){
+      list = list.filter(it => {
+        const hay = [it.href||'', it.thumb||'', it.id||'', it.prompt||'', (OFFLINE.get(it.id)?.prompt)||''].join(' ').toLowerCase();
+        return hay.includes(q);
+      });
+    }
+    FILTERED = list;
+    render(FILTERED);
+  }
+  search.addEventListener('input', applyFilter);
+  preferOffline.addEventListener('change', ()=>render(FILTERED));
+
+  async function render(list){
+    grid.innerHTML = '';
+    let have = 0, miss = 0;
+    for (const item of list){
+      const rec = OFFLINE.get(item.id);
+      const haveOffline = !!(rec && rec.files && rec.files.length);
+      haveOffline ? have++ : miss++;
+
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      const tw = document.createElement('div');
+      tw.className = 'thumbwrap';
+
+      const badges = document.createElement('div');
+      badges.className = 'badges';
+      const offBadge = document.createElement('span');
+      offBadge.className = 'badge ' + (haveOffline ? 'ok' : 'missing');
+      offBadge.textContent = haveOffline ? 'offline' : 'missing';
+      badges.appendChild(offBadge);
+      tw.appendChild(badges);
+
+      const img = document.createElement(isVideoName(rec?.files?.[0]?.name||'') ? 'video' : 'img');
+      img.className = 'thumb';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+
+      if (haveOffline && preferOffline.checked){
+        const file = rec.files[0];
+        const fileObj = await file.handle.getFile();
+        const url = URL.createObjectURL(fileObj);
+        if (img.tagName === 'VIDEO'){
+          img.preload = 'metadata'; img.controls = true; img.src = url;
+        } else {
+          img.src = url;
+        }
+      } else {
+        img.src = item.thumb || item.href || '';
+      }
+      tw.appendChild(img);
+      card.appendChild(tw);
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const a = document.createElement('a');
+      a.href = item.href || '#';
+      a.target = '_blank'; a.rel = 'noopener';
+      a.textContent = (item.href||'').slice(0, 80);
+      meta.appendChild(a);
+      const idSpan = document.createElement('span');
+      idSpan.textContent = ' • ' + (item.id || 'no-id');
+      meta.appendChild(idSpan);
+      card.appendChild(meta);
+
+      const promptText = (rec?.prompt) || item.prompt || '';
+      if (promptText){
+        const p = document.createElement('div');
+        p.className = 'prompt';
+        p.textContent = promptText;
+        card.appendChild(p);
+      }
+
+      const btns = document.createElement('div');
+      btns.className = 'buttons';
+
+      const btnOnline = document.createElement('a');
+      btnOnline.className = 'btn online';
+      btnOnline.textContent = 'View online';
+      btnOnline.href = rebuildOnlineLink(item.href || item.thumb || '');
+      btnOnline.target = '_blank'; btnOnline.rel = 'noopener';
+      btns.appendChild(btnOnline);
+
+      if (haveOffline){
+        const file = rec.files[0];
+        const openOffline = document.createElement('button');
+        openOffline.className = 'btn offline';
+        openOffline.textContent = 'View offline';
+        openOffline.onclick = async ()=>{
+          const f = await file.handle.getFile();
+          const u = URL.createObjectURL(f);
+          window.open(u, '_blank');
+        };
+        btns.appendChild(openOffline);
+      }
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'btn';
+      copyBtn.textContent = 'Copy prompt';
+      copyBtn.onclick = async ()=>{
+        try{ await navigator.clipboard.writeText(promptText || ''); copyBtn.textContent='Copied!'; setTimeout(()=>copyBtn.textContent='Copy prompt', 1200); }
+        catch{ alert(promptText || ''); }
+      };
+      btns.appendChild(copyBtn);
+
+      card.appendChild(btns);
+      grid.appendChild(card);
+    }
+    stats.textContent = `${list.length} items — offline ${have} / missing ${miss}`;
+  }
+
+  document.getElementById('openMissingAuto').addEventListener('click', async () => {
+    const limit = Math.max(1, Math.min(parseInt(limitInput.value||'40',10), FILTERED.length));
+    const delay = Math.max(150, parseInt(delayInput.value||'800',10));
+    const missing = FILTERED.filter(it => !(OFFLINE.get(it.id)?.files?.length));
+    const subset = missing.slice(0, limit);
+    prog.max = subset.length; prog.value = 0; progText.textContent = `0 / ${subset.length}`;
+
+    for (let i=0;i<subset.length;i++){
+      const it = subset[i];
+      let href = rebuildOnlineLink(it.href || it.thumb || '');
+      if (appendAuto.checked) href += (href.includes('?')?'&':'?') + 'auto=1';
+      window.open(href, '_blank', 'noopener');
+      prog.value = i+1; progText.textContent = `${i+1} / ${subset.length}`;
+      await sleep(delay);
+    }
+  });
+
+  // Auto‑load saved index on startup, if we have one
+  (async () => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved){
+      await loadFromText(saved, 'saved copy on load');
+    }
+  })();
+</script>
+</body>
+</html>
+How to use it
+Put sora_offline_viewer_persist.html anywhere (same place as before is fine).
+Open it in your browser (double‑click).
+Once: click “Choose File”, pick your sora_gallery_index.json.
+The viewer renders your whole gallery.
+It also saves that JSON text inside the browser.
+Close the tab, reopen later:
+It will auto‑load from the saved copy.
+No more file‑picking unless you export a new index.
+You’ll still need to click Connect downloads folder… when you want it to scan the folder containing the downloaded images/meta, because the browser absolutely refuses to give a page disk access without a fresh user gesture.
+Bonus: if you ever want the “Load from same folder” button to work
+If you’re willing to run a tiny local server, you can make the old fetch('sora_gallery_index.json') style button work:
+Open a terminal in your C:\sora_offline folder (where the HTML + JSON live).
+Run (if you have Python):
+python -m http.server 8000
+Then open: http://localhost:8000/sora_offline_viewer_persist.html
+Now the page is being served over http://, and fetch('sora_gallery_index.json') is allowed. But honestly, with the “saved index” thing above, you probably don’t need to bother unless you enjoy running little servers.
+If you want, next step I can also tweak the Sora Harvest batch-auto-save launcher the same way (remember the index in storage so you don’t have to pick it every time there either).
+You said:
+Uploaded image
+So it went through and downloaded 40 images, however 2/3 of them are those svg placeholders, I dont think tis letting the page load before saving, or something, because if I manually click the links I can see the iamges. https://cdn.openai.com/sora/images/profile_placeholder_v4.png is what its downloading
+
+but evne the ones it got, they arent in the gallery
+ChatGPT said:
+
+Thought for 8m 51s
+Yeah, this part is messy, but it’s fix‑able.
+There are two separate problems happening:
+Sora Auto Saver is grabbing the placeholder avatar instead of the real image.
+The gallery doesn’t “see” the files you did download.
+Let’s fix both.
+1. Fix the auto‑saver grabbing profile_placeholder_v4.png
+Right now your script returns the first <img> it finds, which is often that https://cdn.openai.com/sora/images/profile_placeholder_v4.png thing. We need to teach it to ignore placeholders and only accept “real” media URLs. Replace your Tampermonkey userscript with this version (v3.1). You can overwrite the existing one:
+// ==UserScript==
+// @name         Sora Auto Saver — loud + robust (v3.1, no placeholders)
+// @namespace    amelia/sora
+// @version      3.1
+// @description  Download media + prompt from Sora /g/<id> pages; auto mode with ?auto=1
+// @match        https://sora.chatgpt.com/g/*
+// @match        *://*/g/*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // --- UI banner ---
+  const bar = document.createElement('div');
+  bar.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;background:#0b3;color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 monospace;box-shadow:0 2px 10px rgba(0,0,0,.4)';
+  document.documentElement.appendChild(bar);
+  const set = t => bar.textContent = 'Sora Saver: ' + t;
+
+  // --- Utils ---
+  function* deepNodes(root = document) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let n;
+    while ((n = walker.nextNode())) {
+      yield n;
+      const sr = n.shadowRoot;
+      if (sr) yield* deepNodes(sr);
+    }
+  }
+
+  function isGoodMediaUrl(url) {
+    if (!url) return false;
+    if (url.startsWith('data:')) return false;
+    // absolutely ignore the Sora placeholder & avatars
+    if (url.includes('profile_placeholder_v4') || url.includes('/sora/images/')) return false;
+    // we really want the asset from videos.openai.com or something that *looks* like real media
+    if (/videos\.openai\.com/.test(url)) return true;
+    return /\.(mp4|webm|mov|m4v|jpg|jpeg|png|webp)(?=[?#]|$)/i.test(url);
+  }
+
+  async function waitForAsset(timeoutMs = 20000) {
+    const t0 = performance.now();
+    let best = null;
+
+    while (performance.now() - t0 < timeoutMs) {
+      set('looking for media…');
+
+      for (const el of deepNodes()) {
+        if (el.tagName === 'VIDEO') {
+          const src = el.currentSrc || el.src || (el.querySelector('source') && el.querySelector('source').src);
+          if (isGoodMediaUrl(src)) {
+            return { url: src, kind: 'video' };
+          }
+        }
+      }
+
+      // Second pass for <img>, after videos
+      for (const el of deepNodes()) {
+        if (el.tagName === 'IMG') {
+          const src = el.currentSrc || el.src;
+          if (isGoodMediaUrl(src)) {
+            // First good image we see; remember but keep scanning a bit
+            best = best || { url: src, kind: 'image' };
+          }
+        }
+      }
+
+      if (best) return best;
+      await sleep(300);
+    }
+    return best; // maybe we saw something right at the end
+  }
+
+  function guessId() {
+    const m = location.pathname.match(/\/g\/([^\/?#]+)/);
+    return m ? m[1] : 'item';
+  }
+
+  function sanitize(s) {
+    return (s || '').replace(/[\\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 120);
+  }
+
+  async function fetchPrompt(timeoutMs = 4000) {
+    const grabText = () => {
+      for (const el of deepNodes()) {
+        const t = el.getAttribute?.('data-prompt') ||
+                  el.getAttribute?.('aria-label') ||
+                  el.getAttribute?.('title') ||
+                  (el.textContent || '');
+        if (t && t.length > 15 && /[ ,.;:!?]/.test(t)) return t.trim();
+      }
+      return '';
+    };
+
+    let txt = grabText();
+    if (txt) return txt;
+    await sleep(timeoutMs);
+    return grabText();
+  }
+
+  async function download(url, filename) {
+    try {
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+      return true;
+    } catch (e) {
+      // Fallback: just open the asset and let the browser handle it
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.click();
+      return false;
+    }
+  }
+
+  async function run(auto) {
+    set('initializing…');
+    const id = guessId();
+
+    const asset = await waitForAsset();
+    if (!asset) { set('no media found (only placeholders?)'); return; }
+    set('media found');
+
+    const prompt = await fetchPrompt();
+    const base = id + (prompt ? ('--' + sanitize(prompt)) : '');
+
+    const ext = (() => {
+      const m = asset.url.match(/\.(mp4|webm|mov|m4v|jpg|jpeg|png|webp)(?=[?#]|$)/i);
+      if (m) return '.' + m[1].toLowerCase();
+      return asset.kind === 'video' ? '.mp4' : '.jpg';
+    })();
+
+    // media
+    const ok = await download(asset.url, base + ext);
+    set(ok ? 'downloaded media' : 'opened asset tab (CORS)');
+
+    // sidecar JSON
+    const meta = {
+      SourceURL: location.href,
+      AssetURL: asset.url,
+      Prompt: prompt || '',
+      Title: sanitize(prompt || ''),
+      Kind: asset.kind,
+      SuggestedBaseName: base
+    };
+    const sidecar = new Blob([JSON.stringify(meta, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(sidecar);
+    a.download = id + '.meta.json';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+
+    set('done ✓');
+    if (auto) { await sleep(1200); window.close(); }
+  }
+
+  // Manual button
+  const btn = document.createElement('button');
+  btn.textContent = 'Download with Prompt';
+  btn.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;background:#134;color:#fff;border:0;padding:8px 12px;border-radius:8px;cursor:pointer';
+  btn.onclick = () => run(false);
+  document.documentElement.appendChild(btn);
+
+  const auto = /[?&]auto=1/.test(location.search);
+  if (auto) run(true);
+  else set('ready (click the button or use ?auto=1)');
+})();
+What this fixes
+It refuses to treat profile_placeholder_v4.png (and any /sora/images/…) as a valid asset.
+It strongly prefers videos.openai.com URLs or obvious real media files.
+So when Sora shows its little avatar / placeholder first, the script ignores it and waits for the real thing.
+2. Why the downloaded ones don’t show up in the gallery
+There are a few gotchas here:
+A. Folder you give to the gallery must be the folder the script downloads into
+The HTML viewer looks at one root folder (plus all sub‑folders) that you pick via “Connect downloads folder…”. Inside that it expects files named like:
+gen_01xxxxxxx--some_prompt_text.webp (or .jpg/.mp4)
+gen_01xxxxxxx.meta.json
+If Chrome is saving them somewhere else (e.g. plain Downloads\images but you picked Downloads or vice‑versa), the viewer won’t see them. So:
+Open one of the files the script did download.
+In Chrome downloads list, right‑click → “Show in folder”.
+Note that folder path (e.g. C:\Users\you\Downloads or C:\SoraStuff\images).
+In the Offline viewer / Harvest page, click Connect downloads folder… and choose that exact folder.
+After that, the cards for those IDs should show as “offline” instead of “missing”, and “View offline” should appear.
+B. The gallery doesn’t auto‑update after new downloads
+The viewer only scans the directory when you connect it. So the loop is:
+Connect folder → it scans → shows what’s offline.
+Hit “Open missing (auto‑save)” → tabs open → tampermonkey downloads stuff.
+When downloads are done, you need to re-scan.
+Right now “re‑scan” = click Connect downloads folder… again and pick the same folder.
+Yeah, clunky, but that’s because the browser doesn’t tell the page “hey, new files came in”. If you want, I can give you a tweaked HTML version with a “Rescan current folder” button that reuses the same handle instead of making you pick it again – but you’d still need one click after a batch.
+C. Quick sanity check that files match what the gallery expects
+Pick any file that should be recognized and confirm:
+Filename starts with the Sora id:
+gen_01k8pw3sp7fq2rvmwjsbnsyy6y--Wizard Pinup Pose.webp
+In the same folder there’s:
+gen_01k8pw3sp7fq2rvmwjsbnsyy6y.meta.json
+That .meta.json has "SourceURL": "https://sora.chatgpt.com/g/gen_01k8pw3sp7fq2rvmwjsbnsyy6y" inside.
+If all that’s true and you connect the right folder, the viewer will map that card as offline.
+3. About “Could not load sora_gallery_index.json” / auto‑loading
+That error happens because you’re opening the HTML as file://… and browsers block fetch("sora_gallery_index.json") from the file origin. You have two options:
+Option 1 – Stick with file:// (simpler, but one manual step)
+Use the file picker at the top (the “Choose File” input) to load sora_gallery_index.json.
+After it loads once, I can tweak the HTML to store that JSON in localStorage so next time it auto‑loads without re‑picking it. (We can do that in a next round if you want.)
+Option 2 – Run a tiny local server (then auto‑load works)
+If you ever want it totally hands‑off:
+Put sora_gallery_index.json and the viewer HTML in a folder, say C:\sora_gallery.
+In that folder, run:
+python -m http.server 8777
+Visit http://localhost:8777/your_viewer_file.html in the browser.
+Now the “Load sora_gallery_index.json” button works automatically (because fetch from HTTP → HTTP is allowed).
+TL;DR “How do I make it sane right now?”
+Update the Tampermonkey script to the v3.1 version above (no more placeholder downloads).
+Run your Harvest / Open Missing (auto‑save) again – watch that the download filenames look like gen_…--….
+When it’s done:
+In the viewer, click Connect downloads folder…
+Pick the actual folder the new files landed in.
+The cards for those should now say offline and show “View offline”.
+If you tell me:
+The exact filename of one of the downloaded images, and
+The folder you pointed the viewer at
+I can tune the offline viewer further (add that Rescan button + JSON auto‑cache) so you’re not wrestling it every time. Come flop on the (simulated) couch when it runs, I’ll keep the scripts behaving.
