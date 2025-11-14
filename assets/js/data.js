@@ -2,7 +2,7 @@
  * Utilities for working with the gallery index and prompts.
  */
 
-const GEN_ID_REGEX = /gen_[a-z0-9]+/i;
+const GEN_ID_REGEX = /gen_[a-z0-9]{4,}/gi;
 const THUMB_KEYS = [
   'thumb',
   'thumbnail',
@@ -22,8 +22,10 @@ const PROMPT_KEYS = ['prompt', 'caption', 'description', 'text'];
  */
 export function extractGenId(value) {
   if (!value || typeof value !== 'string') return null;
-  const match = value.match(GEN_ID_REGEX);
-  return match ? match[0] : null;
+  const matches = value.match(GEN_ID_REGEX);
+  if (!matches || matches.length === 0) return null;
+  matches.sort((a, b) => b.length - a.length);
+  return matches[0].toLowerCase();
 }
 
 /**
