@@ -12,6 +12,10 @@ import {
   ensureReadPermission,
   validateStoredHandle
 } from './fsScanner.js';
+import {
+  attemptPreferredArchiveDirectory,
+  PREFERRED_ARCHIVE_PATH
+} from './preferredFolder.js';
 
 const galleryGrid = document.querySelector('.gallery-grid');
 const searchInput = document.querySelector('#search');
@@ -28,6 +32,10 @@ let normalizedIndex = [];
 let archiveData = { byId: new Map(), mediaCount: 0, metaCount: 0, errors: [] };
 let searchTerm = '';
 const objectUrlCache = new Map();
+
+if (preferOfflineCheckbox) {
+  preferOfflineCheckbox.checked = true;
+}
 
 function setIndexStatus(message, type = 'info') {
   if (!indexStatus) return;
@@ -181,7 +189,11 @@ function createCard(item) {
 
   const promptPara = document.createElement('p');
   promptPara.className = 'prompt';
-  promptPara.textContent = resolvePrompt(item, offlineEntry?.meta) || '—';
+  const promptText = resolvePrompt(item, offlineEntry?.meta);
+  promptPara.textContent = promptText || '—';
+  if (promptText) {
+    promptPara.title = promptText;
+  }
 
   const actions = document.createElement('div');
   actions.className = 'card-actions';
@@ -282,19 +294,13 @@ async function handleIndexFileSelection(event) {
 async function pickArchiveFolder() {
   try {
     const directory = await window.showDirectoryPicker({ mode: 'read' });
-    const granted = await ensureReadPermission(directory);
-    if (!granted) {
-      setArchiveStatus('Permission denied for the selected folder.');
-      return;
+    const connected = await connectArchiveDirectory(directory, {
+      persistHandle: true,
+      sourceLabel: 'selected archive folder'
+    });
+    if (!connected && archiveNotice) {
+      archiveNotice.hidden = false;
     }
-    setArchiveStatus('Scanning archive…');
-    await saveDirectoryHandle(directory);
-    archiveData = await scanArchiveDirectory(directory);
-    setArchiveStatus(`Connected. Media files: ${archiveData.mediaCount}, meta files: ${archiveData.metaCount}.`);
-    if (archiveNotice) {
-      archiveNotice.hidden = true;
-    }
-    renderGallery();
   } catch (error) {
     if (error?.name === 'AbortError') return;
     setArchiveStatus(error instanceof Error ? error.message : String(error));
@@ -303,23 +309,59 @@ async function pickArchiveFolder() {
 
 async function restorePreviousFolder() {
   const stored = await getDirectoryHandle();
-  if (!stored) return;
+  if (!stored) return false;
   const validated = await validateStoredHandle(stored);
-  if (!validated) return;
+  if (!validated) return false;
   setArchiveStatus('Restoring previous archive folder…');
   if (archiveNotice) {
     archiveNotice.hidden = false;
   }
+  const connected = await connectArchiveDirectory(validated, {
+    sourceLabel: 'previous archive folder'
+  });
+  if (!connected && archiveNotice) {
+    archiveNotice.hidden = true;
+  }
+  return connected;
+}
+
+async function connectArchiveDirectory(directory, { persistHandle = false, sourceLabel = 'selected archive folder' } = {}) {
+  if (!directory) return false;
+  const granted = await ensureReadPermission(directory);
+  if (!granted) {
+    setArchiveStatus('Permission denied for the selected folder.');
+    return false;
+  }
+  setArchiveStatus(`Scanning ${sourceLabel}…`);
   try {
-    archiveData = await scanArchiveDirectory(validated);
+    revokeObjectUrls();
+    if (persistHandle) {
+      await saveDirectoryHandle(directory);
+    }
+    archiveData = await scanArchiveDirectory(directory);
+    setArchiveStatus(`Connected. Media files: ${archiveData.mediaCount}, meta files: ${archiveData.metaCount}.`);
     if (archiveNotice) {
       archiveNotice.hidden = true;
     }
-    setArchiveStatus(`Connected. Media files: ${archiveData.mediaCount}, meta files: ${archiveData.metaCount}.`);
     renderGallery();
+    return true;
   } catch (error) {
     setArchiveStatus(error instanceof Error ? error.message : String(error));
+    return false;
   }
+}
+
+async function autoConnectPreferredFolder() {
+  setArchiveStatus(`Attempting to open preferred folder at ${PREFERRED_ARCHIVE_PATH}…`);
+  const directory = await attemptPreferredArchiveDirectory();
+  if (!directory) {
+    setArchiveStatus('Archive folder not connected.');
+    return false;
+  }
+  return connectArchiveDirectory(directory, {
+    persistHandle: true,
+    sourceLabel: `preferred folder (${PREFERRED_ARCHIVE_PATH})`
+  });
 }
 
 async function init() {
@@ -345,7 +387,10 @@ async function init() {
     setIndexStatus('Failed to load sora_gallery_index.json. Please choose an index file manually.', 'error');
   }
 
-  await restorePreviousFolder();
+  const restored = await restorePreviousFolder();
+  if (!restored) {
+    await autoConnectPreferredFolder();
+  }
 }
 
 init();
