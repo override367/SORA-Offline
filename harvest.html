@@ -25,7 +25,7 @@
             <div class="actions">
               <button id="load-index-button" class="secondary" type="button">Load index file…</button>
               <input id="index-file-input" type="file" accept=".json,.txt" hidden />
-              <button id="connect-folder" type="button">Connect archive folder…</button>
+              <button id="connect-folder" type="button">Browse for archive folder…</button>
               <a
                 class="button-link secondary"
                 href="https://override367.github.io/SORA-Offline/"
@@ -34,6 +34,24 @@
               >
                 Hosted gallery view
               </a>
+            </div>
+            <div class="preferred-folder">
+              <label for="preferred-path">Default archive folder</label>
+              <div class="preferred-controls">
+                <input
+                  id="preferred-path"
+                  type="text"
+                  value="C:\\SORAimages\\Images"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+                <button id="connect-preferred" type="button">Connect default folder</button>
+              </div>
+              <p class="help-text">
+                Quick connect will try to open
+                <span data-role="preferred-path-label">C:\SORAimages\Images</span> automatically. Before running the harvest
+                script, set your browser’s Downloads folder to this location so the files land in the right archive folder.
+              </p>
             </div>
             <p id="index-status" class="notice" data-state="info">Waiting for index…</p>
             <p id="archive-status" class="notice" data-state="info">Archive folder not connected.</p>
