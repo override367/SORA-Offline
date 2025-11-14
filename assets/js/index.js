@@ -27,14 +27,28 @@ const loadIndexButton = document.querySelector('#load-index-button');
 const connectFolderButton = document.querySelector('#connect-folder');
 const hiddenIndexInput = document.querySelector('#index-file-input');
 const archiveNotice = document.querySelector('#archive-notice');
+const viewDetailsCheckbox = document.querySelector('#view-details');
+const gridSizeInput = document.querySelector('#grid-size');
+const gridSizeValue = document.querySelector('#grid-size-value');
 
 let normalizedIndex = [];
 let archiveData = { byId: new Map(), mediaCount: 0, metaCount: 0, errors: [] };
 let searchTerm = '';
 const objectUrlCache = new Map();
+let showDetails = viewDetailsCheckbox?.checked ?? false;
+let galleryColumnWidth = gridSizeInput ? Number(gridSizeInput.value) : 300;
 
 if (preferOfflineCheckbox) {
   preferOfflineCheckbox.checked = true;
+}
+
+if (gridSizeInput) {
+  galleryColumnWidth = Number(gridSizeInput.value);
+  document.documentElement.style.setProperty('--gallery-column-width', `${galleryColumnWidth}px`);
+}
+
+if (gridSizeValue) {
+  gridSizeValue.textContent = String(galleryColumnWidth);
 }
 
 function setIndexStatus(message, type = 'info') {
@@ -151,6 +165,8 @@ function createCard(item) {
 
   const preview = document.createElement('div');
   preview.className = 'preview';
+  const mediaContainer = document.createElement('div');
+  mediaContainer.className = 'preview-media';
   const previewImage = document.createElement('img');
   previewImage.alt = item.id;
   previewImage.loading = 'lazy';
@@ -161,21 +177,50 @@ function createCard(item) {
   } else {
     previewImage.src = '';
   }
-  preview.append(previewImage);
+  mediaContainer.append(previewImage);
+  preview.append(mediaContainer);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'preview-overlay';
+  const overlayBadge = createBadge(offlineEntry);
+  const overlayId = document.createElement('span');
+  overlayId.className = 'preview-id';
+  overlayId.textContent = item.id;
+  overlay.append(overlayBadge, overlayId);
+  preview.append(overlay);
 
   if (hasOfflineFile) {
     if (preferOfflineCheckbox.checked || !item.thumbUrl) {
-      applyOfflinePreview(preview, offlineEntry.files[0]);
+      applyOfflinePreview(mediaContainer, offlineEntry.files[0]);
     } else {
       previewImage.addEventListener(
         'error',
         () => {
-          applyOfflinePreview(preview, offlineEntry.files[0]);
+          applyOfflinePreview(mediaContainer, offlineEntry.files[0]);
         },
         { once: true }
       );
     }
   }
+
+  const handlePreviewActivation = (event) => {
+    if (showDetails) return;
+    if (event.type === 'keydown' && !['Enter', ' '].includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    if (item.pageUrl) {
+      window.open(item.pageUrl, '_blank', 'noopener');
+    }
+  };
+
+  preview.tabIndex = showDetails ? -1 : 0;
+  if (!showDetails) {
+    preview.setAttribute('role', 'button');
+    preview.setAttribute('aria-label', `Open ${item.id} online`);
+  }
+  preview.addEventListener('click', handlePreviewActivation);
+  preview.addEventListener('keydown', handlePreviewActivation);
 
   const body = document.createElement('div');
   body.className = 'card-body';
@@ -238,12 +283,17 @@ function createCard(item) {
   body.append(header, promptPara, actions);
   card.append(preview, body);
 
+  if (!showDetails) {
+    card.classList.add('details-hidden');
+  }
+
   return card;
 }
 
 function renderGallery() {
   if (!galleryGrid) return;
   galleryGrid.innerHTML = '';
+  galleryGrid.classList.toggle('details-hidden-mode', !showDetails);
 
   const filtered = normalizedIndex.filter((item) => {
     if (!searchTerm) return true;
@@ -293,6 +343,17 @@ async function handleIndexFileSelection(event) {
 
 async function pickArchiveFolder() {
   try {
+    const preferredDirectory = await attemptPreferredArchiveDirectory();
+    if (preferredDirectory) {
+      const connectedPreferred = await connectArchiveDirectory(preferredDirectory, {
+        persistHandle: true,
+        sourceLabel: `preferred folder (${PREFERRED_ARCHIVE_PATH})`
+      });
+      if (connectedPreferred) {
+        return;
+      }
+    }
+
     const directory = await window.showDirectoryPicker({ mode: 'read' });
     const connected = await connectArchiveDirectory(directory, {
       persistHandle: true,
@@ -375,6 +436,18 @@ async function init() {
   preferOfflineCheckbox?.addEventListener('change', () => {
     revokeObjectUrls();
     renderGallery();
+  });
+  viewDetailsCheckbox?.addEventListener('change', (event) => {
+    showDetails = event.target.checked;
+    renderGallery();
+  });
+  gridSizeInput?.addEventListener('input', (event) => {
+    const value = Number(event.target.value);
+    galleryColumnWidth = Number.isNaN(value) ? galleryColumnWidth : value;
+    document.documentElement.style.setProperty('--gallery-column-width', `${galleryColumnWidth}px`);
+    if (gridSizeValue) {
+      gridSizeValue.textContent = String(galleryColumnWidth);
+    }
   });
 
   setIndexStatus('Loading default index…', 'loading');

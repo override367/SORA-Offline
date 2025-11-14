@@ -43,6 +43,17 @@
             <input id="search" type="search" placeholder="Filter by id, prompt, or metadata" />
           </div>
           <div>
+            <label class="inline" for="view-details">
+              <input id="view-details" type="checkbox" />
+              View details
+            </label>
+          </div>
+          <div class="range-group">
+            <label for="grid-size">Grid size</label>
+            <input id="grid-size" type="range" min="200" max="420" step="10" value="300" />
+            <div class="range-value">Approx. column width: <span id="grid-size-value">300</span>px</div>
+          </div>
+          <div>
             <label class="inline" for="prefer-offline">
               <input id="prefer-offline" type="checkbox" checked />
               Prefer offline media when available
