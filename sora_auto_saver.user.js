@@ -12,8 +12,8 @@
   'use strict';
 
   const AUTO_CLOSE_DELAY = 1500;
-  const MEDIA_POLL_INTERVAL = 500;
-  const MEDIA_POLL_ATTEMPTS = 40;
+  const MEDIA_POLL_INTERVAL = 400;
+  const MEDIA_POLL_ATTEMPTS = 75;
 
   const state = {
     banner: null,
@@ -91,47 +91,95 @@
     return match ? match[0] : null;
   }
 
-  function collectElements(root) {
-    const results = [];
-    const stack = [root];
-    while (stack.length) {
-      const node = stack.pop();
-      if (node instanceof Element) {
-        if (node.tagName === 'VIDEO' || node.tagName === 'IMG') {
-          results.push(node);
-        }
-        if (node.shadowRoot) {
-          stack.push(node.shadowRoot);
-        }
-        stack.push(...node.children);
-      }
-    }
-    return results;
+  function looksLikePlaceholder(url) {
+    if (!url) return false;
+    const normalized = url.toString();
+    if (normalized.startsWith('data:')) return true;
+    if (/placeholder/i.test(normalized)) return true;
+    if (/\bsora\/images\//i.test(normalized)) return true;
+    if (/avatar|thumb|icon/i.test(normalized) && !/generations|videos|outputs?/i.test(normalized)) return true;
+    return false;
   }
 
-  function deriveMediaUrl(element) {
+  function looksLikeRealMedia(url) {
+    if (!url || looksLikePlaceholder(url)) return false;
+    const normalized = url.toString();
+    if (/videos\.openai\.com/i.test(normalized)) return true;
+    if (/vg-?assets?/i.test(normalized)) return true;
+    if (/sora-prod.*\.s3/i.test(normalized)) return true;
+    if (/storage\.googleapis\.com/i.test(normalized)) return true;
+    if (/\.(mp4|webm|mov|m4v|mpg|mpeg|gif)(?=[?#]|$)/i.test(normalized)) return true;
+    if (/\.(png|jpe?g|webp|avif|bmp|tiff)(?=[?#]|$)/i.test(normalized)) return true;
+    return false;
+  }
+
+  function* deepCollect(root) {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (node.shadowRoot) {
+        yield* deepCollect(node.shadowRoot);
+      }
+      yield node;
+    }
+  }
+
+  function deriveMediaCandidate(element) {
+    if (!(element instanceof Element)) return null;
     if (element.tagName === 'VIDEO') {
-      if (element.currentSrc) return { url: element.currentSrc, kind: 'video' };
-      const source = element.querySelector('source[src]');
-      if (source) return { url: source.src, kind: 'video' };
-      if (element.src) return { url: element.src, kind: 'video' };
+      const sources = [element.currentSrc, element.src];
+      const sourceEl = element.querySelector('source[src]');
+      if (sourceEl) sources.push(sourceEl.currentSrc || sourceEl.src);
+      for (const candidate of sources) {
+        if (looksLikeRealMedia(candidate)) {
+          return { url: candidate, kind: 'video' };
+        }
+      }
     }
     if (element.tagName === 'IMG') {
-      if (element.currentSrc) return { url: element.currentSrc, kind: 'image' };
-      if (element.src) return { url: element.src, kind: 'image' };
+      const sources = [element.currentSrc, element.src];
+      const srcset = element.srcset?.split(',') || [];
+      for (const entry of srcset) {
+        const [candidate] = entry.trim().split(/\s+/);
+        if (candidate) sources.push(candidate);
+      }
+      for (const candidate of sources) {
+        if (looksLikeRealMedia(candidate)) {
+          if (element.naturalWidth && element.naturalWidth < 40) continue;
+          if (element.naturalHeight && element.naturalHeight < 40) continue;
+          return { url: candidate, kind: 'image' };
+        }
+      }
     }
     return null;
   }
 
   async function waitForMedia() {
+    let fallbackImage = null;
     for (let attempt = 0; attempt < MEDIA_POLL_ATTEMPTS; attempt += 1) {
-      const elements = collectElements(document.body);
-      for (const element of elements) {
-        const result = deriveMediaUrl(element);
-        if (!result || !result.url) continue;
-        if (/placeholder|dummy|data:image\/svg/i.test(result.url)) continue;
-        return result;
+      for (const element of deepCollect(document)) {
+        if (!(element instanceof Element)) continue;
+        if (element.tagName === 'VIDEO') {
+          const candidate = deriveMediaCandidate(element);
+          if (candidate) {
+            return candidate;
+          }
+        }
       }
+
+      for (const element of deepCollect(document)) {
+        if (!(element instanceof Element) || element.tagName !== 'IMG') continue;
+        const candidate = deriveMediaCandidate(element);
+        if (candidate) {
+          fallbackImage = fallbackImage || candidate;
+        }
+      }
+
+      if (fallbackImage) {
+        return fallbackImage;
+      }
+
       await new Promise((resolve) => setTimeout(resolve, MEDIA_POLL_INTERVAL));
     }
     throw new Error('Timed out waiting for media to load.');
