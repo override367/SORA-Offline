@@ -79,15 +79,30 @@ function createBadge(entry) {
 }
 
 async function openOfflineFile(handle) {
+  const pendingWindow = window.open('', '_blank');
+  if (!pendingWindow) {
+    alert('Pop-up blocked. Please allow pop-ups for this site to view offline files.');
+    return;
+  }
+
   try {
+    if (pendingWindow.document) {
+      pendingWindow.document.title = 'Loading offline file…';
+      if (pendingWindow.document.body) {
+        pendingWindow.document.body.innerHTML =
+          '<main style="display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif;background:#0f1115;color:#e5ecff;">Loading offline file…</main>';
+      }
+    }
+
     const file = await handle.getFile();
     const url = URL.createObjectURL(file);
-    const win = window.open(url, '_blank');
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    if (!win) {
-      alert('Pop-up blocked. Please allow pop-ups for this site to view offline files.');
-    }
+    pendingWindow.location.replace(url);
+
+    const revokeLater = () => URL.revokeObjectURL(url);
+    pendingWindow.addEventListener('beforeunload', revokeLater, { once: true });
+    setTimeout(revokeLater, 60_000);
   } catch (error) {
+    pendingWindow.close();
     alert(`Unable to open file: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
