@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sora Archive Kit — Harvest</title>
+    <link rel="stylesheet" href="assets/css/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Harvest missing items</h1>
+        <p class="lead">Batch-open Sora tabs for items that are missing locally so your Tampermonkey script can auto-save them.</p>
+      </header>
+
+      <section class="harvest-controls">
+        <div class="controls-grid">
+          <div>
+            <div class="actions">
+              <button id="load-index-button" class="secondary" type="button">Load index file…</button>
+              <input id="index-file-input" type="file" accept=".json,.txt" hidden />
+              <button id="connect-folder" type="button">Connect archive folder…</button>
+            </div>
+            <p id="index-status" class="notice" data-state="info">Waiting for index…</p>
+            <p id="archive-status" class="notice" data-state="info">Archive folder not connected.</p>
+          </div>
+          <div>
+            <label class="inline" for="open-limit">Open limit</label>
+            <input id="open-limit" type="number" min="1" value="40" />
+          </div>
+          <div>
+            <label class="inline" for="delay-ms">Delay between tabs (ms)</label>
+            <input id="delay-ms" type="number" min="0" value="800" />
+          </div>
+          <div>
+            <label class="inline" for="append-auto">
+              <input id="append-auto" type="checkbox" checked />
+              Append ?auto=1
+            </label>
+          </div>
+          <div>
+            <button id="open-missing" type="button">Open missing (auto-save)</button>
+          </div>
+        </div>
+        <div class="progress-bar" aria-hidden="true">
+          <span id="progress-fill"></span>
+        </div>
+        <p id="progress-text" class="notice">0 / 0</p>
+      </section>
+
+      <section>
+        <h2>Missing items</h2>
+        <div class="harvest-list"></div>
+      </section>
+
+      <footer>
+        Use together with the Sora auto-saver userscript. Tabs will open in the background while the script downloads each item.
+      </footer>
+    </main>
+    <script type="module" src="assets/js/harvest.js"></script>
+  </body>
+</html>
