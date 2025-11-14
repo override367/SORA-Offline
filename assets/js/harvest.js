@@ -14,11 +14,14 @@ import {
 } from './fsScanner.js';
 import {
   attemptPreferredArchiveDirectory,
-  PREFERRED_ARCHIVE_PATH
+  getPreferredArchivePath,
+  setPreferredArchivePath,
+  DEFAULT_PREFERRED_ARCHIVE_PATH
 } from './preferredFolder.js';
 
 const loadIndexButton = document.querySelector('#load-index-button');
 const connectFolderButton = document.querySelector('#connect-folder');
+const connectPreferredButton = document.querySelector('#connect-preferred');
 const hiddenIndexInput = document.querySelector('#index-file-input');
 const indexStatus = document.querySelector('#index-status');
 const archiveStatus = document.querySelector('#archive-status');
@@ -30,6 +33,8 @@ const progressText = document.querySelector('#progress-text');
 const progressFill = document.querySelector('#progress-fill');
 const harvestList = document.querySelector('.harvest-list');
 const pendingCountText = document.querySelector('#pending-count');
+const preferredPathInput = document.querySelector('#preferred-path');
+const preferredPathLabels = document.querySelectorAll('[data-role="preferred-path-label"]');
 
 let normalizedIndex = [];
 let archiveData = { byId: new Map(), mediaCount: 0, metaCount: 0, errors: [] };
@@ -43,6 +48,16 @@ function setIndexStatus(message, type = 'info') {
 function setArchiveStatus(message) {
   if (!archiveStatus) return;
   archiveStatus.textContent = message;
+}
+
+function syncPreferredPathUI() {
+  const path = getPreferredArchivePath();
+  if (preferredPathInput) {
+    preferredPathInput.value = path;
+  }
+  preferredPathLabels.forEach((node) => {
+    node.textContent = path;
+  });
 }
 
 function renderHarvestList() {
@@ -138,6 +153,20 @@ async function pickArchiveFolder() {
   }
 }
 
+async function connectPreferredFolder() {
+  const preferredPath = getPreferredArchivePath();
+  setArchiveStatus(`Attempting to open preferred folder at ${preferredPath}…`);
+  const directory = await attemptPreferredArchiveDirectory(preferredPath);
+  if (!directory) {
+    setArchiveStatus(`Could not connect to ${preferredPath}. Use “Browse for archive folder…” to grant access.`);
+    return false;
+  }
+  return connectArchiveDirectory(directory, {
+    persistHandle: true,
+    sourceLabel: `preferred folder (${preferredPath})`
+  });
+}
+
 async function restorePreviousFolder() {
   const stored = await getDirectoryHandle();
   if (!stored) return false;
@@ -173,15 +202,16 @@ async function connectArchiveDirectory(directory, { persistHandle = false, sourc
 }
 
 async function autoConnectPreferredFolder() {
-  setArchiveStatus(`Attempting to open preferred folder at ${PREFERRED_ARCHIVE_PATH}…`);
-  const directory = await attemptPreferredArchiveDirectory();
+  const preferredPath = getPreferredArchivePath();
+  setArchiveStatus(`Attempting to open preferred folder at ${preferredPath}…`);
+  const directory = await attemptPreferredArchiveDirectory(preferredPath);
   if (!directory) {
     setArchiveStatus('Archive folder not connected.');
     return false;
   }
   return connectArchiveDirectory(directory, {
     persistHandle: true,
-    sourceLabel: `preferred folder (${PREFERRED_ARCHIVE_PATH})`
+    sourceLabel: `preferred folder (${preferredPath})`
   });
 }
 
@@ -238,7 +268,17 @@ async function init() {
   loadIndexButton?.addEventListener('click', () => hiddenIndexInput?.click());
   hiddenIndexInput?.addEventListener('change', handleIndexFileSelection);
   connectFolderButton?.addEventListener('click', pickArchiveFolder);
+  connectPreferredButton?.addEventListener('click', connectPreferredFolder);
   openButton?.addEventListener('click', openMissing);
+
+  preferredPathInput?.addEventListener('change', (event) => {
+    const input = event.target.value;
+    const nextPath = setPreferredArchivePath(input || DEFAULT_PREFERRED_ARCHIVE_PATH);
+    syncPreferredPathUI();
+    setArchiveStatus(`Default archive folder set to ${nextPath}.`);
+  });
+
+  syncPreferredPathUI();
 
   setIndexStatus('Loading default index…', 'loading');
   const defaultIndex = await loadDefaultIndex();
