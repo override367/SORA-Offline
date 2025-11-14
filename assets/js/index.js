@@ -146,12 +146,28 @@ function createCard(item) {
   const previewImage = document.createElement('img');
   previewImage.alt = item.id;
   previewImage.loading = 'lazy';
+  const hasOfflineFile = offlineEntry && offlineEntry.files.length > 0;
+
   if (item.thumbUrl && !preferOfflineCheckbox.checked) {
     previewImage.src = item.thumbUrl;
   } else {
-    previewImage.src = item.thumbUrl || '';
+    previewImage.src = '';
   }
   preview.append(previewImage);
+
+  if (hasOfflineFile) {
+    if (preferOfflineCheckbox.checked || !item.thumbUrl) {
+      applyOfflinePreview(preview, offlineEntry.files[0]);
+    } else {
+      previewImage.addEventListener(
+        'error',
+        () => {
+          applyOfflinePreview(preview, offlineEntry.files[0]);
+        },
+        { once: true }
+      );
+    }
+  }
 
   const body = document.createElement('div');
   body.className = 'card-body';
@@ -209,10 +225,6 @@ function createCard(item) {
   actions.append(onlineButton, offlineButton, copyButton);
   body.append(header, promptPara, actions);
   card.append(preview, body);
-
-  if (preferOfflineCheckbox.checked && offlineEntry && offlineEntry.files.length > 0) {
-    applyOfflinePreview(preview, offlineEntry.files[0]);
-  }
 
   return card;
 }
